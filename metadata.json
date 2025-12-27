@@ -1,0 +1,8 @@
+{
+  "name": "MusetoN",
+  "description": "An intelligent music theory companion that visualizes scales, chords, and intervals on a dynamic piano interface using generative AI.",
+  "requestFramePermissions": [
+    "microphone",
+    "geolocation"
+  ]
+}
