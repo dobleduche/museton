@@ -7,20 +7,10 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-
 node_modules
 dist
 dist-ssr
 *.local
-.env
-.env.*.local
-build
-.cache
-.next
-.out
-.nuxt
-*.tsbuildinfo
-
 
 # Editor directories and files
 .vscode/*
@@ -32,8 +22,3 @@ build
 *.njsproj
 *.sln
 *.sw?
-*.class
-*.jar
-*.war
-*.ear
-*.iml

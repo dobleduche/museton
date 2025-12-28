@@ -1,7 +1,6 @@
-
 import React, { useState, useRef, useEffect } from 'react';
 import { Tutor } from '../types';
-import { callOpenRouter } from '../services/geminiService';
+import { GoogleGenAI } from "@google/genai";
 import { Send, User, Bot, Crown, X } from 'lucide-react';
 
 interface TutorChatProps {
@@ -10,7 +9,9 @@ interface TutorChatProps {
     isPro: boolean;
 }
 
-
+// Instantiate GoogleGenAI here to avoid recreation on every render,
+// as API key is assumed to be consistently available via process.env.API_KEY.
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 export const TutorChat: React.FC<TutorChatProps> = ({ tutor, onClose, isPro }) => {
     const [messages, setMessages] = useState<{role: 'user'|'model', text: string}[]>([
@@ -20,7 +21,9 @@ export const TutorChat: React.FC<TutorChatProps> = ({ tutor, onClose, isPro }) =
     const [loading, setLoading] = useState(false);
     const bottomRef = useRef<HTMLDivElement>(null);
 
-    const isRateLimited = !isPro && messages.filter(m => m.role === 'user').length >= 3;
+    // Free tier limit: 3 user messages
+    const FREE_TIER_LIMIT = 3;
+    const isRateLimited = !isPro && messages.filter(m => m.role === 'user').length >= FREE_TIER_LIMIT;
 
     useEffect(() => {
         bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -35,26 +38,34 @@ export const TutorChat: React.FC<TutorChatProps> = ({ tutor, onClose, isPro }) =
         setLoading(true);
 
         try {
-            const systemPrompt = `
+            const systemInstruction = `
                 You are ${tutor.name}, a world-class music tutor specializing in ${tutor.specialty.join(', ')}.
                 Your teaching style is ${tutor.rate === '$$$' ? 'sophisticated and strict' : 'casual and encouraging'}.
                 Location: ${tutor.location}.
                 Keep responses concise (under 50 words) and actionable.
+                You are an AI, but use the persona of ${tutor.name}.
             `;
-            // Prepare messages for OpenRouter
-            const chatHistory = [
-                { role: 'system', content: systemPrompt },
-                ...messages.map(m => ({ role: m.role === 'user' ? 'user' : 'assistant', content: m.text })),
-                { role: 'user', content: userMsg }
-            ];
-            const reply = await callOpenRouter(chatHistory, { max_tokens: 120, temperature: 0.7 });
-            setMessages(prev => [...prev, { role: 'model', text: reply || "I'm listening..." }]);
+            
+            const chatHistoryForAPI = messages.map(m => ({ role: m.role, parts: [{ text: m.text }] }));
+            // Add the current user message to the history for the API call
+            const contents = chatHistoryForAPI.concat([{ role: 'user', parts: [{ text: userMsg }] }]);
+
+            const response = await ai.models.generateContent({
+                model: 'gemini-2.5-flash', // Appropriate model for conversational text
+                contents: contents as any,
+                config: { systemInstruction }
+            });
+            
+            setMessages(prev => [...prev, { role: 'model', text: response.text || "I'm listening..." }]);
         } catch (e: any) {
+            console.error("Tutor chat API error:", e);
+            let errorMessage = "Connection with the studio was lost. Try again.";
             if (e.message?.includes('429') || e.message?.includes('quota')) {
-                setMessages(prev => [...prev, { role: 'model', text: "⚠️ System Overload: Global API Quota Exceeded. Please try again later." }]);
-            } else {
-                setMessages(prev => [...prev, { role: 'model', text: "Connection with the studio was lost. Try again." }]);
+                 errorMessage = "⚠️ System Overload: Global API Quota Exceeded. Please try again later. Or upgrade to Pro for unlimited access.";
+            } else if (e.message?.includes('API_KEY')) {
+                 errorMessage = "⚠️ API Key not configured. Please ensure your API key is correctly set.";
             }
+            setMessages(prev => [...prev, { role: 'model', text: errorMessage }]);
         }
         setLoading(false);
     };
@@ -78,7 +89,7 @@ export const TutorChat: React.FC<TutorChatProps> = ({ tutor, onClose, isPro }) =
                 </div>
 
                 {/* Chat Area */}
-                <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-[#050508]">
+                <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-[#050508] custom-scrollbar">
                     {messages.map((m, i) => (
                         <div key={i} className={`flex gap-3 ${m.role === 'user' ? 'flex-row-reverse' : ''}`}>
                             <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${m.role === 'user' ? 'bg-slate-700' : 'bg-cyan-900/30 text-cyan-400'}`}>
@@ -108,7 +119,7 @@ export const TutorChat: React.FC<TutorChatProps> = ({ tutor, onClose, isPro }) =
                 <div className="p-4 bg-slate-800 border-t border-slate-700">
                     {isRateLimited && (
                         <div className="mb-3 p-2 bg-yellow-500/10 border border-yellow-500/30 rounded text-center animate-in fade-in">
-                            <p className="text-xs text-yellow-200 mb-1">Free Session Limit Reached</p>
+                            <p className="text-xs text-yellow-200 mb-1">Free Session Limit Reached ({FREE_TIER_LIMIT} questions)</p>
                             <button className="text-xs font-bold bg-yellow-500 text-black px-3 py-1 rounded hover:scale-105 transition-transform flex items-center justify-center gap-1 w-full">
                                 <Crown className="w-3 h-3" /> UNLOCK UNLIMITED
                             </button>

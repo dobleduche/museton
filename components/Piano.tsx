@@ -278,7 +278,7 @@ export const Piano: React.FC<PianoProps> = ({ data, tuning = 440, targetNotes = 
       <div className="h-20 bg-black/40 border-b border-white/5 relative flex items-center justify-center overflow-hidden">
         <canvas ref={canvasRef} width={600} height={80} className="absolute inset-0 w-full h-full opacity-80" />
         <div className="absolute inset-0 scanline opacity-20"></div>
-        <div className="absolute top-2 left-3 text-[10px] text-cyan-500/50 font-mono tracking-[0.2em] flex gap-2">
+        <div className="absolute top-2 left-3 text-[10px] text-cyan-500/50 font-mono tracking-[0.2em] flex gap-2 z-10">
            <span>OSCILLATOR VISUALIZATION</span>
            <span className="text-white/30">|</span>
            <span>TUNING: {tuning}Hz</span>

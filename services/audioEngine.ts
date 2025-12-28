@@ -1,4 +1,3 @@
-
 import { AudioEnvironment, EqPreset, SurroundMode, InstrumentType, SynthConfig } from '../types';
 
 class AudioEngine {
