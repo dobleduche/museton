@@ -92,41 +92,6 @@ const InstrumentSelector = ({ current, onSelect }: { current: InstrumentType, on
   );
 };
 
-// --- Mock Data ---
-const MOCK_TUTORS: Tutor[] = [
-    { id: '1', name: "Maestro Vance", specialty: ["Jazz", "Theory"], isVerified: true, rating: 5.0, rate: "$$$", location: "New York", avatar: "V" },
-    { id: '2', name: "Producer Lex", specialty: ["Trap", "Mixing"], isVerified: true, rating: 4.8, rate: "$$", location: "Atlanta", avatar: "L" },
-    { id: '3', name: "Sarah Keys", specialty: ["Classical", "Piano"], isVerified: true, rating: 4.9, rate: "$$", location: "London", avatar: "S" },
-    { id: '4', name: "Dr. Rhythm", specialty: ["Percussion", "Polyrhythms"], isVerified: false, rating: 4.5, rate: "$", location: "Remote", avatar: "R" },
-];
-
-const MOCK_ASSIGNMENTS: Assignment[] = [
-  { id: '1', title: 'C Major Scale Mastery', provider: 'Internal', dueDate: new Date(Date.now() + 86400000), status: 'Pending', lessonId: 'lesson-c-maj' },
-  { id: '2', title: 'Listen: Kind of Blue', provider: 'Spotify', link: 'https://spotify.com', dueDate: new Date(Date.now() + 172800000), status: 'Pending', thumbnail: 'https://upload.wikimedia.org/wikipedia/en/9/9c/MilesDavisKindofBlue.jpg' },
-  { id: '3', title: 'Trap Beat Basics', provider: 'SoundCloud', link: 'https://soundcloud.com', dueDate: new Date(Date.now() + 259200000), status: 'Completed', thumbnail: 'https://i1.sndcdn.com/artworks-000242801280-hp1541-t500x500.jpg' },
-  { id: '4', title: 'Sight Reading 101', provider: 'Flat.io', link: 'https://flat.io', dueDate: new Date(Date.now() + 604800000), status: 'Pending' },
-];
-
-const MOCK_LESSONS: Record<string, Lesson> = {
-  'lesson-c-maj': {
-    id: 'lesson-c-maj',
-    title: 'C Major Scale',
-    description: 'Learn the foundational scale of Western music.',
-    difficulty: 'Beginner',
-    instrument: 'PIANO',
-    xpReward: 150,
-    steps: [
-      { instruction: "Play Middle C (C4)", targetNotes: ["C4"] },
-      { instruction: "Play D4", targetNotes: ["D4"] },
-      { instruction: "Play E4", targetNotes: ["E4"] },
-      { instruction: "Play F4", targetNotes: ["F4"] },
-      { instruction: "Play G4", targetNotes: ["G4"] },
-      { instruction: "Play A4", targetNotes: ["A4"] },
-      { instruction: "Play B4", targetNotes: ["B4"] },
-      { instruction: "Finish with High C (C5)", targetNotes: ["C5"] },
-    ]
-  }
-};
 
 const DEFAULT_PREFS: UserPreferences = {
     theme: 'neon',
@@ -228,12 +193,69 @@ export const App = () => {
 
   // Guided Lesson State
   const [activeLesson, setActiveLesson] = useState<Lesson | null>(null);
-  const [assignments, setAssignments] = useState<Assignment[]>(MOCK_ASSIGNMENTS);
+  const [tutors, setTutors] = useState<Tutor[]>([]);
+  const [assignments, setAssignments] = useState<Assignment[]>([]);
+  const [lessons, setLessons] = useState<Lesson[]>([]);
   const [lastInputEvent, setLastInputEvent] = useState<{note: string, timestamp: number} | null>(null);
 
   // Init & Persistence Check
   useEffect(() => {
+    const seedTutors = [
+      { id: '1', name: "Maestro Vance", specialty: ["Jazz", "Theory"], isVerified: true, rating: 5.0, rate: "$$$", location: "New York", avatar: "V" },
+      { id: '2', name: "Producer Lex", specialty: ["Trap", "Mixing"], isVerified: true, rating: 4.8, rate: "$$", location: "Atlanta", avatar: "L" },
+      { id: '3', name: "Sarah Keys", specialty: ["Classical", "Piano"], isVerified: true, rating: 4.9, rate: "$$", location: "London", avatar: "S" },
+      { id: '4', name: "Dr. Rhythm", specialty: ["Percussion", "Polyrhythms"], isVerified: false, rating: 4.5, rate: "$", location: "Remote", avatar: "R" },
+    ];
+    const seedAssignments = [
+      { id: '1', title: 'C Major Scale Mastery', provider: 'Internal', dueDate: new Date(Date.now() + 86400000), status: 'Pending', lessonId: 'lesson-c-maj' },
+      { id: '2', title: 'Listen: Kind of Blue', provider: 'Spotify', link: 'https://spotify.com', dueDate: new Date(Date.now() + 172800000), status: 'Pending', thumbnail: 'https://upload.wikimedia.org/wikipedia/en/9/9c/MilesDavisKindofBlue.jpg' },
+      { id: '3', title: 'Trap Beat Basics', provider: 'SoundCloud', link: 'https://soundcloud.com', dueDate: new Date(Date.now() + 259200000), status: 'Completed', thumbnail: 'https://i1.sndcdn.com/artworks-000242801280-hp1541-t500x500.jpg' },
+      { id: '4', title: 'Sight Reading 101', provider: 'Flat.io', link: 'https://flat.io', dueDate: new Date(Date.now() + 604800000), status: 'Pending' },
+    ];
+    const seedLessons = [
+      {
+        id: 'lesson-c-maj',
+        title: 'C Major Scale',
+        description: 'Learn the foundational scale of Western music.',
+        difficulty: 'Beginner',
+        instrument: 'PIANO',
+        xpReward: 150,
+        steps: [
+          { instruction: "Play Middle C (C4)", targetNotes: ["C4"] },
+          { instruction: "Play D4", targetNotes: ["D4"] },
+          { instruction: "Play E4", targetNotes: ["E4"] },
+          { instruction: "Play F4", targetNotes: ["F4"] },
+          { instruction: "Play G4", targetNotes: ["G4"] },
+          { instruction: "Play A4", targetNotes: ["A4"] },
+          { instruction: "Play B4", targetNotes: ["B4"] },
+          { instruction: "Finish with High C (C5)", targetNotes: ["C5"] },
+        ]
+      }
+    ];
     const init = async () => {
+            // Tutors
+            let loadedTutors = await db.getTutors();
+            if (!loadedTutors || loadedTutors.length === 0) {
+              for (const t of seedTutors) await db.saveTutor(t);
+              loadedTutors = await db.getTutors();
+            }
+            setTutors(loadedTutors);
+
+            // Assignments
+            let loadedAssignments = await db.getAssignments();
+            if (!loadedAssignments || loadedAssignments.length === 0) {
+              for (const a of seedAssignments) await db.saveAssignment(a);
+              loadedAssignments = await db.getAssignments();
+            }
+            setAssignments(loadedAssignments);
+
+            // Lessons
+            let loadedLessons = await db.getLessons();
+            if (!loadedLessons || loadedLessons.length === 0) {
+              for (const l of seedLessons) await db.saveLesson(l);
+              loadedLessons = await db.getLessons();
+            }
+            setLessons(loadedLessons);
       // 1. Check LocalStorage for Persistence Flag
       const storedPrefs = localStorage.getItem('museton-prefs');
       if (storedPrefs) {
@@ -543,7 +565,7 @@ export const App = () => {
 
   // Lesson Logic
   const startLesson = (lessonId: string) => {
-    const lesson = MOCK_LESSONS[lessonId];
+    const lesson = lessons.find(l => l.id === lessonId);
     if (lesson) {
         setActiveLesson(lesson);
         setActiveTab('learn'); // Switch to instrument view
@@ -959,7 +981,7 @@ export const App = () => {
             
             {activeTab === 'tutors' && (
                 <TutorDirectory 
-                    tutors={MOCK_TUTORS}
+                    tutors={tutors}
                     onChat={setActiveTutor}
                 />
             )}

@@ -1,7 +1,7 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { Tutor } from '../types';
-import { GoogleGenAI } from "@google/genai";
+import { callOpenRouter } from '../services/geminiService';
 import { Send, User, Bot, Crown, X } from 'lucide-react';
 
 interface TutorChatProps {
@@ -10,7 +10,7 @@ interface TutorChatProps {
     isPro: boolean;
 }
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+
 
 export const TutorChat: React.FC<TutorChatProps> = ({ tutor, onClose, isPro }) => {
     const [messages, setMessages] = useState<{role: 'user'|'model', text: string}[]>([
@@ -35,25 +35,25 @@ export const TutorChat: React.FC<TutorChatProps> = ({ tutor, onClose, isPro }) =
         setLoading(true);
 
         try {
-            const systemInstruction = `
+            const systemPrompt = `
                 You are ${tutor.name}, a world-class music tutor specializing in ${tutor.specialty.join(', ')}.
                 Your teaching style is ${tutor.rate === '$$$' ? 'sophisticated and strict' : 'casual and encouraging'}.
                 Location: ${tutor.location}.
                 Keep responses concise (under 50 words) and actionable.
             `;
-            
-            const response = await ai.models.generateContent({
-                model: 'gemini-2.5-flash',
-                contents: messages.map(m => ({ role: m.role, parts: [{ text: m.text }] })).concat([{ role: 'user', parts: [{ text: userMsg }] }]) as any, // Simple chat history construction
-                config: { systemInstruction }
-            });
-            
-            setMessages(prev => [...prev, { role: 'model', text: response.text || "I'm listening..." }]);
+            // Prepare messages for OpenRouter
+            const chatHistory = [
+                { role: 'system', content: systemPrompt },
+                ...messages.map(m => ({ role: m.role === 'user' ? 'user' : 'assistant', content: m.text })),
+                { role: 'user', content: userMsg }
+            ];
+            const reply = await callOpenRouter(chatHistory, { max_tokens: 120, temperature: 0.7 });
+            setMessages(prev => [...prev, { role: 'model', text: reply || "I'm listening..." }]);
         } catch (e: any) {
             if (e.message?.includes('429') || e.message?.includes('quota')) {
-                 setMessages(prev => [...prev, { role: 'model', text: "⚠️ System Overload: Global API Quota Exceeded. Please try again later." }]);
+                setMessages(prev => [...prev, { role: 'model', text: "⚠️ System Overload: Global API Quota Exceeded. Please try again later." }]);
             } else {
-                 setMessages(prev => [...prev, { role: 'model', text: "Connection with the studio was lost. Try again." }]);
+                setMessages(prev => [...prev, { role: 'model', text: "Connection with the studio was lost. Try again." }]);
             }
         }
         setLoading(false);

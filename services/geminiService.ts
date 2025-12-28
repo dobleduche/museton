@@ -1,8 +1,29 @@
 
-import { GoogleGenAI, Type } from "@google/genai";
+// import { GoogleGenAI, Type } from "@google/genai";
 import { TheoryData, QuizQuestion, BeatProject, AudioAnalysis, MusicalSettings, PracticeSession, BackingTrack, AccompanimentStyle } from "../types";
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+
+const OPENROUTER_API_KEY = import.meta.env.VITE_OPENROUTER_API_KEY || '';
+const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
+const GROK_MODEL = 'grok';
+
+export async function callOpenRouter(messages: {role: string, content: string}[], options?: {max_tokens?: number, temperature?: number}) {
+  const res = await fetch(OPENROUTER_API_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: GROK_MODEL,
+      messages,
+      ...options
+    })
+  });
+  if (!res.ok) throw new Error('OpenRouter API error: ' + res.statusText);
+  const data = await res.json();
+  return data.choices?.[0]?.message?.content || '';
+}
 
 // --- UTILS: Robust JSON Parsing ---
 const cleanAndParseJSON = <T>(text: string, fallback: T): T => {
@@ -172,67 +193,20 @@ export const generateBeatStructure = async (query: string): Promise<BeatProject>
 // --- Identifier: SHAZAM-STYLE RECOGNITION ---
 export const analyzeAudioEnvironment = async (audioBase64: string): Promise<AudioAnalysis> => {
   const fallback: AudioAnalysis = { matchFound: false, detectedGenre: "Undetected", likelyKey: "-", bpm: 0, similarArtists: ["Try a clearer recording"], globalUsageMatches: [] };
-  
   try {
-    const systemInstruction = `
-        You are an advanced Music Recognition System.
-        1. Listen to the audio clip. IDENTIFY THE SPECIFIC SONG (Title, Artist) if possible.
-        2. If a known song is identified, set 'matchFound' to true and fill 'identifiedSong'.
-        3. If no specific song is recognized, perform a deep audio analysis of the genre, key, and bpm.
-        4. Detect similar artists based on timbre and style.
+    const systemPrompt = `
+      You are an advanced Music Recognition System.
+      1. Listen to the audio clip. IDENTIFY THE SPECIFIC SONG (Title, Artist) if possible.
+      2. If a known song is identified, set 'matchFound' to true and fill 'identifiedSong'.
+      3. If no specific song is recognized, perform a deep audio analysis of the genre, key, and bpm.
+      4. Detect similar artists based on timbre and style.
     `;
-
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: {
-        parts: [
-          {
-            inlineData: {
-              mimeType: "audio/webm;codecs=opus",
-              data: audioBase64
-            }
-          },
-          {
-            text: "Identify this audio. Is it a known song? If not, what is the style?"
-          }
-        ]
-      },
-      config: {
-        systemInstruction,
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            matchFound: { type: Type.BOOLEAN },
-            identifiedSong: {
-                type: Type.OBJECT,
-                properties: {
-                    title: { type: Type.STRING },
-                    artist: { type: Type.STRING },
-                    album: { type: Type.STRING },
-                    releaseYear: { type: Type.STRING },
-                    coverColor: { type: Type.STRING },
-                }
-            },
-            detectedGenre: { type: Type.STRING },
-            likelyKey: { type: Type.STRING },
-            bpm: { type: Type.INTEGER },
-            similarArtists: { type: Type.ARRAY, items: { type: Type.STRING } },
-            globalUsageMatches: { 
-              type: Type.ARRAY, 
-              items: { 
-                type: Type.OBJECT,
-                properties: {
-                  country: { type: Type.STRING },
-                  usageCount: { type: Type.INTEGER }
-                }
-              } 
-            }
-          }
-        }
-      }
-    });
-    return cleanAndParseJSON(response.text!, fallback);
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: `Analyze this audio (base64): ${audioBase64}` }
+    ];
+    const content = await callOpenRouter(messages, { max_tokens: 300 });
+    return cleanAndParseJSON<AudioAnalysis>(content, fallback);
   } catch (error) {
     return handleGenAIError(error, fallback);
   }

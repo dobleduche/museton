@@ -39,6 +39,18 @@ interface TheoryGenDB extends DBSchema {
       timestamp: Date;
     };
   };
+  tutors: {
+    key: string;
+    value: import('../types').Tutor;
+  };
+  assignments: {
+    key: string;
+    value: import('../types').Assignment;
+  };
+  lessons: {
+    key: string;
+    value: import('../types').Lesson;
+  };
 }
 
 const DB_NAME = 'theorygen-db';
@@ -68,8 +80,59 @@ export const db = {
         if (!db.objectStoreNames.contains('synth_presets')) {
           db.createObjectStore('synth_presets', { keyPath: 'id', autoIncrement: true });
         }
+        if (!db.objectStoreNames.contains('tutors')) {
+          db.createObjectStore('tutors', { keyPath: 'id' });
+        }
+        if (!db.objectStoreNames.contains('assignments')) {
+          db.createObjectStore('assignments', { keyPath: 'id' });
+        }
+        if (!db.objectStoreNames.contains('lessons')) {
+          db.createObjectStore('lessons', { keyPath: 'id' });
+        }
       },
     });
+  },
+
+  // Tutors
+  async saveTutor(tutor) {
+    const database = await this.init();
+    return database.put('tutors', tutor);
+  },
+  async getTutors() {
+    const database = await this.init();
+    return database.getAll('tutors');
+  },
+  async deleteTutor(id) {
+    const database = await this.init();
+    return database.delete('tutors', id);
+  },
+
+  // Assignments
+  async saveAssignment(assignment) {
+    const database = await this.init();
+    return database.put('assignments', assignment);
+  },
+  async getAssignments() {
+    const database = await this.init();
+    return database.getAll('assignments');
+  },
+  async deleteAssignment(id) {
+    const database = await this.init();
+    return database.delete('assignments', id);
+  },
+
+  // Lessons
+  async saveLesson(lesson) {
+    const database = await this.init();
+    return database.put('lessons', lesson);
+  },
+  async getLessons() {
+    const database = await this.init();
+    return database.getAll('lessons');
+  },
+  async deleteLesson(id) {
+    const database = await this.init();
+    return database.delete('lessons', id);
   },
 
   async savePersona(persona: UserPersona) {
