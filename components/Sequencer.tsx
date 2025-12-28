@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef } from 'react';
 import { Play, Square, Save, FolderOpen, Trash2, Merge, RefreshCw, Plus, Settings2, Zap, GraduationCap, CheckCircle } from 'lucide-react';
 import { BeatProject, SavedProject } from '../types';
@@ -56,10 +57,10 @@ export const Sequencer: React.FC<Props> = ({ project, onUpdate, onGenerateAI }) 
     
     // We add a tiny offset for visual feedback queue if we were using Tone.js, 
     // but here we just trigger audio. The visual loop will catch up.
-    if (currentProject.patterns.kick[stepNumber]) audio.playDrum('KICK', time, 1.0);
-    if (currentProject.patterns.snare[stepNumber]) audio.playDrum('SNARE', time, 1.0);
-    if (currentProject.patterns.hat[stepNumber]) audio.playDrum('HAT', time, 1.0);
-    if (currentProject.patterns.clap[stepNumber]) audio.playDrum('CLAP', time, 1.0);
+    if (currentProject.patterns.kick[stepNumber]) audio.playDrum('KICK', time);
+    if (currentProject.patterns.snare[stepNumber]) audio.playDrum('SNARE', time);
+    if (currentProject.patterns.hat[stepNumber]) audio.playDrum('HAT', time);
+    if (currentProject.patterns.clap[stepNumber]) audio.playDrum('CLAP', time);
   };
 
   const nextStep = () => {
@@ -131,7 +132,7 @@ export const Sequencer: React.FC<Props> = ({ project, onUpdate, onGenerateAI }) 
   };
 
   const handleManualTrigger = (inst: 'kick' | 'snare' | 'hat' | 'clap') => {
-      audio.playDrum(inst.toUpperCase() as any, undefined, 1.0);
+      audio.playDrum(inst.toUpperCase() as any);
       setActivePad(inst);
       setTimeout(() => setActivePad(null), 100);
   }
