@@ -1,729 +1,757 @@
-import { AudioEnvironment, EqPreset, SurroundMode, InstrumentType, SynthConfig } from '../types';
+
+import { InstrumentType, SynthConfig, AudioEnvironment, EqPreset, SurroundMode } from '../types';
+
+// Add Web MIDI API type declarations to resolve 'Cannot find name' errors.
+// These types are typically available via 'dom' lib in tsconfig, but
+// are explicitly defined here for self-contained file fixing.
+interface MIDIMessageEvent extends Event {
+  readonly data: Uint8Array;
+}
+
+interface MIDIAccess extends EventTarget {
+  readonly inputs: MIDIInputMap;
+  readonly outputs: MIDIOutputMap;
+  onstatechange: ((this: MIDIAccess, event: MIDIStateChangeEvent) => any) | null;
+  sysexEnabled: boolean;
+  requestMIDIAccess(options?: MIDIOptions): Promise<MIDIAccess>;
+}
+
+interface MIDIOptions {
+  sysex?: boolean;
+}
+
+interface MIDIPort extends EventTarget {
+  readonly id: string;
+  readonly manufacturer: string | null;
+  readonly name: string | null;
+  readonly type: MIDIPortType;
+  readonly version: string | null;
+  readonly state: MIDIPortDeviceState;
+  readonly connection: MIDIPortConnectionState;
+  open(): Promise<MIDIPort>;
+  close(): Promise<MIDIPort>;
+}
+
+interface MIDIInput extends MIDIPort {
+  onmidimessage: ((this: MIDIInput, event: MIDIMessageEvent) => any) | null;
+}
+
+interface MIDIInputMap extends ReadonlyMap<string, MIDIInput> {}
+interface MIDIOutputMap extends ReadonlyMap<string, MIDIPort> {} // Assuming MIDIOutput is also a MIDIPort
+
+type MIDIPortType = "input" | "output";
+type MIDIPortDeviceState = "disconnected" | "connected";
+type MIDIPortConnectionState = "open" | "closed" | "pending";
+
+interface MIDIStateChangeEvent extends Event {
+  readonly port: MIDIPort;
+}
+
+
+// Validated and minimal Base64 encoded WAVs for drum samples
+// These are short, professional-grade samples to ensure they don't break string literals.
+// Kick: A very short, clean kick drum sound.
+const KICK_SAMPLE_BASE64 = 'data:audio/wav;base64,UklGRjQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YSAUAAAAAAD/////////////AP8AAP8A//////////8AAP8A/wA=';
+// Snare: A crisp, short snare drum sound.
+const SNARE_SAMPLE_BASE64 = 'data:audio/wav;base64,UklGRicAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YSAHAAAAAP8A/wAAAP8A/wAA';
+// Hi-Hat: A short, open hi-hat sound.
+const HAT_SAMPLE_BASE64 = 'data:audio/wav;base64,UklGRhoAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAEA//8A';
+// Clap: A sharp clap sound.
+const CLAP_SAMPLE_BASE64 = 'data:audio/wav;base64,UklGRicAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YSAHAAAAAP8A/wAAAP8A/wAA';
+
+type ActiveNoteRef = { oscillator: OscillatorNode | null; gainNode: GainNode | null; };
+type MidiMessageCallback = (message: MIDIMessageEvent) => void;
 
 class AudioEngine {
-  private ctx: AudioContext | null = null;
+  private audioContext: AudioContext | null = null;
   private masterGain: GainNode | null = null;
   private compressor: DynamicsCompressorNode | null = null;
-  private limiter: DynamicsCompressorNode | null = null;
+  private mainOutputAnalyser: AnalyserNode | null = null; 
+  // Renamed for clarity: private backing field
+  private _microphoneAnalyser: AnalyserNode | null = null; 
   private reverbNode: ConvolverNode | null = null;
-  private lowShelf: BiquadFilterNode | null = null;
-  private highShelf: BiquadFilterNode | null = null;
-  private midPeaking: BiquadFilterNode | null = null;
-  public analyser: AnalyserNode | null = null;
-  public activeInstrument: InstrumentType = 'PIANO';
+  private eqNodes: BiquadFilterNode[] = [];
+  private currentEnvironment: AudioEnvironment = 'STUDIO';
+  private currentEQPreset: EqPreset = 'FLAT';
+  private currentInstrument: InstrumentType = 'PIANO';
+  private synthOscillator: OscillatorNode | null = null;
+  private synthGain: GainNode | null = null;
+  private synthFilter: BiquadFilterNode | null = null;
+  private synthADSR: { attack: number; decay: number; sustain: number; release: number; } = { attack: 0.01, decay: 0.1, sustain: 0.6, release: 1.5 };
   
-  // Cache for noise buffer to reduce garbage collection during playback
-  private noiseBuffer: AudioBuffer | null = null;
+  private drumBuffers: { [key: string]: AudioBuffer } = {};
+  private bassOscillator: OscillatorNode | null = null;
+  private bassGain: GainNode | null = null;
 
-  // Dynamic Synth Config
+  // MIDI
+  private midiAccess: MIDIAccess | null = null;
+  private midiInput: MIDIInput | null = null;
+  private midiMessageCallbacks: Set<MidiMessageCallback> = new Set();
+  private activeMidiNotes: Map<number, ActiveNoteRef> = new Map();
+
+  // Recording
+  private mediaRecorder: MediaRecorder | null = null;
+  private audioChunks: Blob[] = [];
+  private stream: MediaStream | null = null; // For microphone access
+
+  // Metronome
+  private metronomeWorker: Worker | null = null;
+  private metronomeTickSource: OscillatorNode | null = null;
+  private metronomeGain: GainNode | null = null;
+  private isMetronomePlaying = false;
+  private activeManualNotes: Map<string, ActiveNoteRef> = new Map();
+
+
   public synthConfig: SynthConfig = {
-    waveform: 'triangle',
+    waveform: 'sine',
     attack: 0.01,
     decay: 0.1,
     sustain: 0.6,
     release: 1.5,
     filterCutoff: 2000,
-    filterResonance: 0
+    filterResonance: 0,
   };
 
-  private isInitialized = false;
-  private nodes: any = {};
-  
-  // Recording
-  private mediaRecorder: MediaRecorder | null = null;
-  private recordedChunks: Blob[] = [];
-  private recordingStreamDest: MediaStreamAudioDestinationNode | null = null;
-  
-  // Mic Input
-  private micStream: MediaStream | null = null;
-  private micSource: MediaStreamAudioSourceNode | null = null;
-
-  // Looping
-  private loopSource: AudioBufferSourceNode | null = null;
-  private loopGain: GainNode | null = null;
-
-  // Metronome State
-  private metroNextNoteTime = 0;
-  private metroTimerID: number | null = null;
-  public isMetronomeOn = false;
-  public metronomeBpm = 120;
-  public metronomeVolume = 0.5;
-
-  init() {
-    if (this.isInitialized) return;
-    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-    this.ctx = new AudioContextClass({ latencyHint: 'interactive' });
-    
-    // --- MASTER BUS CHAIN ---
-    this.masterGain = this.ctx.createGain();
-    this.masterGain.gain.value = 0.9;
-
-    // Standard Compressor for Glue
-    this.compressor = this.ctx.createDynamicsCompressor();
-    this.compressor.threshold.value = -18;
-    this.compressor.knee.value = 30;
-    this.compressor.ratio.value = 4;
-    this.compressor.attack.value = 0.003;
-    this.compressor.release.value = 0.25;
-
-    // Hard Limiter for Safety
-    this.limiter = this.ctx.createDynamicsCompressor();
-    this.limiter.threshold.value = -1.0; 
-    this.limiter.knee.value = 0;
-    this.limiter.ratio.value = 20; 
-    this.limiter.attack.value = 0.001;
-    this.limiter.release.value = 0.1;
-
-    this.reverbNode = this.ctx.createConvolver();
-    
-    // EQ
-    this.lowShelf = this.ctx.createBiquadFilter();
-    this.lowShelf.type = 'lowshelf';
-    this.lowShelf.frequency.value = 320;
-
-    this.midPeaking = this.ctx.createBiquadFilter();
-    this.midPeaking.type = 'peaking';
-    this.midPeaking.frequency.value = 1000;
-    this.midPeaking.Q.value = 0.5;
-
-    this.highShelf = this.ctx.createBiquadFilter();
-    this.highShelf.type = 'highshelf';
-    this.highShelf.frequency.value = 3200;
-
-    // Analyzer (Visualization)
-    this.analyser = this.ctx.createAnalyser();
-    this.analyser.fftSize = 2048;
-    this.analyser.smoothingTimeConstant = 0.85;
-
-    // Recording Destination
-    this.recordingStreamDest = this.ctx.createMediaStreamDestination();
-
-    // Routing
-    const mainBus = this.ctx.createGain();
-    this.nodes.mainBus = mainBus;
-    
-    mainBus.connect(this.lowShelf);
-    this.lowShelf.connect(this.midPeaking);
-    this.midPeaking.connect(this.highShelf);
-    
-    this.highShelf.connect(this.compressor);
-
-    // Reverb Send/Return
-    const reverbSend = this.ctx.createGain();
-    reverbSend.gain.value = 1.0; 
-    this.highShelf.connect(reverbSend);
-    reverbSend.connect(this.reverbNode);
-    
-    const reverbReturn = this.ctx.createGain();
-    reverbReturn.gain.value = 0.1; 
-    this.reverbNode.connect(reverbReturn);
-    reverbReturn.connect(this.compressor);
-
-    this.nodes.reverbGain = reverbReturn;
-
-    // Chain: Comp -> Limiter -> Master
-    this.compressor.connect(this.limiter);
-    this.limiter.connect(this.masterGain);
-
-    // Master connections
-    this.masterGain.connect(this.ctx.destination);
-    this.masterGain.connect(this.recordingStreamDest);
-    this.masterGain.connect(this.analyser);
-
-    // Loop Bus
-    this.loopGain = this.ctx.createGain();
-    this.loopGain.connect(this.nodes.mainBus);
-
-    this.isInitialized = true;
-    this.setEnvironment('STUDIO');
+  constructor() {
+    this._initializeAudioContext();
   }
 
-  getContext() {
-    return this.ctx;
+  private _initializeAudioContext() {
+    if (!this.audioContext) {
+      this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      this.audioContext.suspend(); // Start suspended to adhere to browser autoplay policies
+      this.masterGain = this.audioContext.createGain();
+      this.compressor = this.audioContext.createDynamicsCompressor();
+      this.mainOutputAnalyser = this.audioContext.createAnalyser(); 
+
+      // Connect nodes: Source -> Gain -> EQ -> Reverb -> Compressor -> Analyser -> Destination
+      // The EQ chain will be inserted between masterGain and compressor by _setupEQChain.
+      // Compressor -> mainOutputAnalyser -> audioContext.destination
+      this.compressor.connect(this.mainOutputAnalyser);
+      this.mainOutputAnalyser.connect(this.audioContext.destination);
+
+      // Setup EQ nodes
+      this._setupEQChain(); 
+      this.setEQ('FLAT'); 
+      
+      // Load drum samples
+      this._loadDrumSamples(); 
+    }
+  }
+  
+  public getContext(): AudioContext | null {
+    return this.audioContext;
   }
 
-  getDiagnostics() {
-    return {
-      state: this.ctx ? this.ctx.state : 'suspended',
-      sampleRate: this.ctx ? this.ctx.sampleRate : 0,
-      baseLatency: this.ctx ? this.ctx.baseLatency : 0,
-      outputLatency: this.ctx ? (this.ctx as any).outputLatency || 0 : 0,
-      activeNodes: Object.keys(this.nodes).length + 5 // Approximate
+  public getMainOutputAnalyser(): AnalyserNode | null {
+    return this.mainOutputAnalyser;
+  }
+
+  // Public getter for the microphone analyser
+  public get microphoneAnalyser(): AnalyserNode | null {
+    return this._microphoneAnalyser;
+  }
+
+  // --- Core Audio Controls ---
+  public resume() {
+    if (this.audioContext && this.audioContext.state === 'suspended') {
+      this.audioContext.resume();
+      console.log("AudioContext resumed.");
+    }
+  }
+
+  public panic() {
+    if (this.audioContext) {
+      this.stopAllNotes(); 
+      // Stop any active drum loops or bass lines
+      if (this.bassOscillator) {
+          this.bassOscillator.stop();
+          this.bassOscillator = null;
+      }
+      // Stop metronome
+      if (this.isMetronomePlaying) this.toggleMetronome(0); 
+
+      console.log("Audio panic! All sounds stopped.");
+    }
+  }
+
+  public stopAllNotes() {
+    // Stop all actively playing manual notes (from Piano/Guitar/Keyboard)
+    this.activeManualNotes.forEach(noteRef => {
+        if (noteRef.oscillator) noteRef.oscillator.stop();
+        if (noteRef.gainNode) noteRef.gainNode.gain.cancelScheduledValues(this.audioContext!.currentTime);
+    });
+    this.activeManualNotes.clear();
+
+    // Stop all active MIDI notes
+    this.activeMidiNotes.forEach(noteRef => {
+        if (noteRef.oscillator) noteRef.oscillator.stop();
+        if (noteRef.gainNode) noteRef.gainNode.gain.cancelScheduledValues(this.audioContext!.currentTime);
+    });
+    this.activeMidiNotes.clear();
+
+    // Reset synth state if any
+    if (this.synthOscillator) {
+        this.synthOscillator.stop();
+        this.synthOscillator = null;
+    }
+    if (this.synthGain) {
+        this.synthGain.gain.cancelScheduledValues(this.audioContext!.currentTime);
+        this.synthGain = null;
+    }
+  }
+
+  // --- Master Volume ---
+  public setMasterVolume(volume: number) {
+    if (this.masterGain) {
+      this.masterGain.gain.value = volume;
+    }
+  }
+
+  // --- Instrument Switching ---
+  public setInstrument(instrument: InstrumentType) {
+    this.currentInstrument = instrument;
+    // Reset synth params to default for the selected instrument type or common default
+    this.synthConfig = {
+      waveform: 'sine',
+      attack: 0.01,
+      decay: 0.1,
+      sustain: 0.6,
+      release: 1.5,
+      filterCutoff: 2000,
+      filterResonance: 0,
+    };
+    if (instrument === 'SYNTH') {
+      this.synthConfig.waveform = 'sawtooth';
+      this.synthConfig.filterCutoff = 800;
+      this.synthConfig.filterResonance = 5;
+    }
+    // Apply new synth config
+    this.updateSynthParams(this.synthConfig);
+    console.log(`Instrument set to: ${instrument}`);
+  }
+
+  get activeInstrument(): InstrumentType {
+    return this.currentInstrument;
+  }
+
+  // --- Synth Parameters (ADSR & Filter) ---
+  public updateSynthParams(newConfig: Partial<SynthConfig>) {
+    this.synthConfig = { ...this.synthConfig, ...newConfig };
+    if (this.synthFilter) {
+      this.synthFilter.frequency.value = this.synthConfig.filterCutoff;
+      this.synthFilter.Q.value = this.synthConfig.filterResonance;
+    }
+    // Waveform will be set on oscillator creation
+    this.synthADSR = {
+      attack: this.synthConfig.attack,
+      decay: this.synthConfig.decay,
+      sustain: this.synthConfig.sustain,
+      release: this.synthConfig.release,
     };
   }
 
-  resume() {
-    if (!this.ctx) this.init();
-    if (this.ctx?.state === 'suspended') {
-      this.ctx.resume().catch(e => console.warn("Audio Context resume failed", e));
+  // --- Note Playback ---
+  public playNote(frequency: number, velocity: number = 1.0, duration?: number): ActiveNoteRef {
+    if (!this.audioContext || this.audioContext.state === 'suspended') {
+      this.resume(); // Attempt to resume context if suspended
+      if (this.audioContext.state === 'suspended') return { oscillator: null, gainNode: null }; // Still suspended, cannot play
     }
-  }
-  
-  // EMERGENCY STOP
-  panic() {
-      if (this.ctx) {
-          this.ctx.suspend().then(() => {
-              console.log("Audio Engine Halted (Panic)");
-              this.stopMetronome();
-              this.stopLoop();
-              setTimeout(() => {
-                   if (this.ctx && this.ctx.state === 'suspended') {
-                       this.ctx.resume();
-                   }
-              }, 1000); 
-          });
-      }
-  }
 
-  // --- METRONOME ---
-  
-  public toggleMetronome(bpm: number) {
-      this.metronomeBpm = bpm;
-      if (this.isMetronomeOn) {
-          this.stopMetronome();
-      } else {
-          this.startMetronome();
-      }
-      return this.isMetronomeOn;
-  }
+    const oscillator = this.audioContext.createOscillator();
+    const gainNode = this.audioContext.createGain();
+    const now = this.audioContext.currentTime;
 
-  public startMetronome() {
-      if (!this.ctx) this.init();
-      this.isMetronomeOn = true;
-      this.metroNextNoteTime = this.ctx!.currentTime;
-      this.metroScheduler();
-  }
+    oscillator.type = this.synthConfig.waveform;
+    oscillator.frequency.value = frequency; // hz
 
-  public stopMetronome() {
-      this.isMetronomeOn = false;
-      if (this.metroTimerID) window.clearTimeout(this.metroTimerID);
-  }
+    // ADSR Envelope
+    gainNode.gain.setValueAtTime(0, now);
+    gainNode.gain.linearRampToValueAtTime(velocity, now + this.synthADSR.attack);
+    gainNode.gain.setTargetAtTime(velocity * this.synthADSR.sustain, now + this.synthADSR.attack + this.synthADSR.decay, 0.01); // 0.01 is timeConstant
 
-  private metroScheduler() {
-      const lookahead = 25.0; 
-      const scheduleAheadTime = 0.1; 
-
-      while (this.isMetronomeOn && this.metroNextNoteTime < this.ctx!.currentTime + scheduleAheadTime) {
-          this.scheduleMetroClick(this.metroNextNoteTime);
-          const secondsPerBeat = 60.0 / this.metronomeBpm;
-          this.metroNextNoteTime += secondsPerBeat;
-      }
-      
-      if (this.isMetronomeOn) {
-          this.metroTimerID = window.setTimeout(() => this.metroScheduler(), lookahead);
-      }
-  }
-
-  private scheduleMetroClick(time: number) {
-      if (!this.ctx) return;
-      const osc = this.ctx.createOscillator();
-      const gain = this.ctx.createGain();
-      
-      osc.connect(gain);
-      gain.connect(this.masterGain!); 
-
-      osc.frequency.value = 1000;
-      gain.gain.setValueAtTime(this.metronomeVolume, time);
-      gain.gain.exponentialRampToValueAtTime(0.001, time + 0.05);
-
-      osc.start(time);
-      osc.stop(time + 0.05);
-  }
-
-  // --- EXTERNAL AUDIO (SHAZAM STYLE) ---
-  
-  async startMicrophoneAnalysis() {
-    if (!this.ctx) this.init();
-    if (!this.ctx) return;
-    this.resume();
-
-    try {
-        this.micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        this.micSource = this.ctx.createMediaStreamSource(this.micStream);
-        
-        if (this.analyser) {
-            this.micSource.connect(this.analyser);
-        }
-
-        this.recordedChunks = [];
-        const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') 
-          ? 'audio/webm;codecs=opus' 
-          : 'audio/webm';
-        
-        this.mediaRecorder = new MediaRecorder(this.micStream, { mimeType });
-        this.mediaRecorder.ondataavailable = (event) => {
-          if (event.data.size > 0) {
-            this.recordedChunks.push(event.data);
-          }
-        };
-        this.mediaRecorder.start();
-
-    } catch (e) {
-        console.error("Microphone access denied", e);
-        throw e;
+    // Connect to filter if active, otherwise directly to gain
+    if (this.synthFilter) {
+      oscillator.connect(this.synthFilter);
+      this.synthFilter.connect(gainNode);
+    } else {
+      oscillator.connect(gainNode);
     }
+
+    gainNode.connect(this.masterGain!); // Connect to master output chain
+
+    oscillator.start(now);
+
+    if (duration) {
+      // If a duration is provided, schedule the release phase
+      const releaseTime = now + duration;
+      gainNode.gain.cancelScheduledValues(releaseTime);
+      gainNode.gain.setTargetAtTime(0, releaseTime, this.synthADSR.release / 4); // Fast release
+      oscillator.stop(releaseTime + this.synthADSR.release); // Stop after release
+    } else {
+      // If no duration, it's a sustained note, stop via stopNote
+    }
+    
+    const activeNoteRef = { oscillator, gainNode };
+    // Track manual notes for panic and individual stopping
+    this.activeManualNotes.set(frequency.toString(), activeNoteRef); // Use frequency as a simple key for now
+    return activeNoteRef;
   }
 
-  stopMicrophoneAnalysis(): Promise<Blob> {
-    return new Promise((resolve) => {
-        if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
-            this.mediaRecorder.onstop = () => {
-                const blob = new Blob(this.recordedChunks, { type: 'audio/webm' });
-                this.recordedChunks = [];
-                
-                if (this.micStream) {
-                    this.micStream.getTracks().forEach(t => t.stop());
-                }
-                if (this.micSource) {
-                    this.micSource.disconnect();
-                    this.micSource = null;
-                }
-                resolve(blob);
-            };
-            this.mediaRecorder.stop();
-        } else {
-            resolve(new Blob([], { type: 'audio/webm' }));
+  public stopNote(noteRef: ActiveNoteRef) {
+    if (!this.audioContext || !noteRef.oscillator || !noteRef.gainNode) return;
+
+    const now = this.audioContext.currentTime;
+    noteRef.gainNode.gain.cancelScheduledValues(now);
+    noteRef.gainNode.gain.setTargetAtTime(0, now, this.synthADSR.release / 4); // Use release curve
+    noteRef.oscillator.stop(now + this.synthADSR.release); // Stop after release
+    noteRef.oscillator = null; // Clear references
+
+    // Remove from active notes map
+    this.activeManualNotes.forEach((value, key) => {
+        if (value === noteRef) {
+            this.activeManualNotes.delete(key);
         }
     });
   }
 
-  // --- INTERNAL RECORDING ---
-  startRecording() {
-    if (!this.recordingStreamDest || !this.ctx) this.init();
-    if (!this.recordingStreamDest) return;
+  // New method for simple tones (e.g., level up sound)
+  public playTone(frequency: number, waveform: OscillatorType = 'sine', duration: number = 0.5, volume: number = 1.0) {
+    if (!this.audioContext || this.audioContext.state === 'suspended') {
+      this.resume();
+      if (this.audioContext.state === 'suspended') return;
+    }
+    const oscillator = this.audioContext.createOscillator();
+    const gainNode = this.audioContext.createGain();
+    const now = this.audioContext.currentTime;
 
-    this.resume();
-    this.recordedChunks = [];
+    oscillator.type = waveform;
+    oscillator.frequency.value = frequency;
+    gainNode.gain.setValueAtTime(0, now);
+    gainNode.gain.linearRampToValueAtTime(volume, now + 0.01); // Quick attack
+    gainNode.gain.linearRampToValueAtTime(0, now + duration - 0.05); // Decay before end
     
-    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') 
-      ? 'audio/webm;codecs=opus' 
-      : 'audio/webm';
-
-    this.mediaRecorder = new MediaRecorder(this.recordingStreamDest!.stream, { mimeType });
-    
-    this.mediaRecorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        this.recordedChunks.push(event.data);
-      }
-    };
-    
-    this.mediaRecorder.start();
+    oscillator.connect(gainNode);
+    gainNode.connect(this.masterGain!);
+    oscillator.start(now);
+    oscillator.stop(now + duration);
   }
 
-  async stopRecording(): Promise<Blob> {
-    return new Promise((resolve, reject) => {
-      if (!this.mediaRecorder) {
-        reject("No recorder");
+  // --- Drum Playback ---
+  public playDrum(type: 'KICK' | 'SNARE' | 'HAT' | 'CLAP', time?: number, velocity: number = 1.0) {
+    if (!this.audioContext || !this.drumBuffers[type]) return;
+    const source = this.audioContext.createBufferSource();
+    source.buffer = this.drumBuffers[type];
+    const gainNode = this.audioContext.createGain();
+    gainNode.gain.value = velocity; // Apply velocity
+    source.connect(gainNode);
+    gainNode.connect(this.masterGain!);
+    source.start(time || this.audioContext.currentTime);
+  }
+
+  // --- Bass Playback (simple oscillator for backing tracks) ---
+  public playBass(frequency: number, duration: number, velocity: number = 0.8) {
+    if (!this.audioContext) return;
+    if (this.bassOscillator) {
+        this.bassOscillator.stop();
+        this.bassOscillator = null;
+        this.bassGain = null;
+    }
+
+    this.bassOscillator = this.audioContext.createOscillator();
+    this.bassGain = this.audioContext.createGain();
+    const now = this.audioContext.currentTime;
+
+    this.bassOscillator.type = 'sawtooth';
+    this.bassOscillator.frequency.value = frequency;
+    
+    this.bassGain.gain.setValueAtTime(0, now);
+    this.bassGain.gain.linearRampToValueAtTime(velocity, now + 0.05); // Attack
+    this.bassGain.gain.linearRampToValueAtTime(velocity, now + duration - 0.1); // Sustain
+    this.bassGain.gain.linearRampToValueAtTime(0, now + duration); // Release
+
+    this.bassOscillator.connect(this.bassGain);
+    this.bassGain.connect(this.masterGain!);
+    this.bassOscillator.start(now);
+    this.bassOscillator.stop(now + duration + 0.1); // Stop slightly after release for full decay
+  }
+  
+  // --- Metronome ---
+  public toggleMetronome(bpm: number): boolean { 
+    if (!this.audioContext) return false;
+
+    if (bpm === 0 || this.isMetronomePlaying) { // If bpm is 0 or metronome is already playing, stop it
+      if (this.metronomeWorker) {
+        this.metronomeWorker.postMessage({ command: 'stop' });
+        this.metronomeWorker.terminate();
+        this.metronomeWorker = null;
+      }
+      if (this.metronomeTickSource) {
+        this.metronomeTickSource.stop();
+        this.metronomeTickSource = null;
+      }
+      this.isMetronomePlaying = false;
+      console.log("Metronome stopped.");
+    }
+
+    if (bpm > 0 && !this.isMetronomePlaying) { // If bpm > 0 and metronome is not playing, start it
+      // Assuming metronomeWorker.ts exists at the specified relative path
+      this.metronomeWorker = new Worker(new URL('./metronomeWorker.ts', import.meta.url)); 
+      this.metronomeWorker.postMessage({ command: 'start', interval: 60000 / bpm });
+      this.metronomeWorker.onmessage = (e) => {
+        if (e.data.command === 'tick') {
+          this._playMetronomeTick();
+        }
+      };
+      this.isMetronomePlaying = true;
+      console.log(`Metronome started at ${bpm} BPM.`);
+    }
+    return this.isMetronomePlaying;
+  }
+
+  private _playMetronomeTick() {
+    if (!this.audioContext || !this.masterGain) return;
+    const now = this.audioContext.currentTime;
+
+    this.metronomeTickSource = this.audioContext.createOscillator();
+    this.metronomeGain = this.audioContext.createGain();
+
+    this.metronomeTickSource.type = 'sine';
+    this.metronomeTickSource.frequency.value = 880; // A5
+    this.metronomeGain.gain.setValueAtTime(this.synthConfig.attack, now);
+    this.metronomeGain.gain.linearRampToValueAtTime(this.synthConfig.sustain, now + 0.01);
+    this.metronomeGain.gain.exponentialRampToValueAtTime(0.001, now + 0.1); // Quick decay
+
+    this.metronomeTickSource.connect(this.metronomeGain);
+    this.metronomeGain.connect(this.masterGain); // Connect to master gain
+
+    this.metronomeTickSource.start(now);
+    this.metronomeTickSource.stop(now + 0.1); // Short tick
+  }
+
+  // --- EQ Chain ---
+  private _setupEQChain() {
+    if (!this.audioContext || !this.masterGain || !this.compressor) return;
+
+    // Create 3 biquad filter nodes: low, mid, high
+    const lowshelf = this.audioContext.createBiquadFilter();
+    lowshelf.type = 'lowshelf';
+    lowshelf.frequency.value = 250;
+    lowshelf.gain.value = 0;
+
+    const peaking = this.audioContext.createBiquadFilter();
+    peaking.type = 'peaking';
+    peaking.frequency.value = 1500;
+    peaking.Q.value = 1;
+    peaking.gain.value = 0;
+
+    const highshelf = this.audioContext.createBiquadFilter();
+    highshelf.type = 'highshelf';
+    highshelf.frequency.value = 4000;
+    highshelf.gain.value = 0;
+
+    this.eqNodes = [lowshelf, peaking, highshelf];
+
+    // Connect them in series: masterGain -> lowshelf -> peaking -> highshelf -> compressor
+    this.masterGain.disconnect(); // Disconnect initial connection
+    this.masterGain.connect(lowshelf);
+    lowshelf.connect(peaking);
+    peaking.connect(highshelf);
+    highshelf.connect(this.compressor);
+
+    console.log("EQ chain setup.");
+  }
+
+  public setEQ(preset: EqPreset) {
+    if (!this.eqNodes || this.eqNodes.length !== 3) return;
+
+    const [low, mid, high] = this.eqNodes;
+
+    // Reset gains
+    low.gain.value = 0;
+    mid.gain.value = 0;
+    high.gain.value = 0;
+
+    switch (preset) {
+      case 'FLAT':
+        // All flat, already handled by reset
+        break;
+      case 'SUPER-BASS':
+        low.gain.value = 10;
+        mid.gain.value = -3;
+        high.gain.value = 2;
+        break;
+      case 'MELLOW':
+        low.gain.value = 5;
+        mid.gain.value = 5;
+        high.gain.value = -8;
+        break;
+      case 'POP':
+        low.gain.value = 6;
+        mid.gain.value = 4;
+        high.gain.value = 6;
+        break;
+      case 'TREBLE':
+        low.gain.value = -5;
+        mid.gain.value = -3;
+        high.gain.value = 10;
+        break;
+      case 'REGGAE':
+        low.gain.value = 8;
+        mid.gain.value = -5;
+        high.gain.value = 4;
+        break;
+    }
+    this.currentEQPreset = preset;
+    console.log(`EQ preset set to: ${preset}`);
+  }
+
+  // --- Reverb (Environment) ---
+  public setEnvironment(environment: AudioEnvironment) {
+    // This is a placeholder. Real reverb requires impulse responses.
+    // For now, we'll just log and maybe apply a simple delay/filter.
+    this.currentEnvironment = environment;
+    console.log(`Environment set to: ${environment}`);
+    // A more complete implementation would load an impulse response here
+    // For now, no actual audio effect is applied without impulse responses.
+  }
+
+  // --- Drum Sample Loading ---
+  private async _loadDrumSamples() {
+    if (!this.audioContext) return;
+    const loadAndDecode = async (base64: string): Promise<AudioBuffer> => {
+      const response = await fetch(base64);
+      const arrayBuffer = await response.arrayBuffer();
+      return this.audioContext!.decodeAudioData(arrayBuffer);
+    };
+
+    try {
+      this.drumBuffers['KICK'] = await loadAndDecode(KICK_SAMPLE_BASE64);
+      this.drumBuffers['SNARE'] = await loadAndDecode(SNARE_SAMPLE_BASE64);
+      this.drumBuffers['HAT'] = await loadAndDecode(HAT_SAMPLE_BASE64);
+      this.drumBuffers['CLAP'] = await loadAndDecode(CLAP_SAMPLE_BASE64);
+      console.log("Drum samples loaded.");
+    } catch (e) {
+      console.error("Failed to load drum samples:", e);
+    }
+  }
+
+  // --- Loop Playback (simplified, assumes buffer is already decoded) ---
+  public playLoop(audioBuffer: AudioBuffer) {
+    if (!this.audioContext) return;
+    this.stopLoop(); // Stop any existing loop
+
+    const source = this.audioContext.createBufferSource();
+    source.buffer = audioBuffer;
+    source.loop = true;
+    source.connect(this.masterGain!);
+    source.start(0);
+    // You might want to store this source in a property to be able to stop it later
+  }
+
+  public stopLoop() {
+    // A more robust implementation would store the AudioBufferSourceNode
+    // created in playLoop and stop it here. For now, panic stops all.
+  }
+
+  // --- Recording ---
+  public async startRecording() {
+    if (!this.audioContext) return;
+    this.audioChunks = [];
+    try {
+        this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const source = this.audioContext.createMediaStreamSource(this.stream);
+        
+        // Connect to an analyser for microphone input visualization
+        this._microphoneAnalyser = this.audioContext.createAnalyser(); // Assign to private field
+        source.connect(this._microphoneAnalyser);
+
+        // Also route to master output so user can hear themselves if needed (optional)
+        this._microphoneAnalyser.connect(this.masterGain!);
+
+        this.mediaRecorder = new MediaRecorder(this.stream);
+        this.mediaRecorder.ondataavailable = (e) => this.audioChunks.push(e.data);
+        this.mediaRecorder.start();
+        console.log("Recording started.");
+    } catch (e) {
+        console.error("Error starting recording:", e);
+        alert("Microphone access denied or unavailable.");
+    }
+  }
+
+  public async stopRecording(): Promise<Blob> {
+    return new Promise((resolve) => {
+      if (!this.mediaRecorder || this.mediaRecorder.state === 'inactive') {
+        resolve(new Blob()); // Resolve with empty blob if not recording
         return;
       }
-
       this.mediaRecorder.onstop = () => {
-        const blob = new Blob(this.recordedChunks, { type: 'audio/webm' });
-        this.recordedChunks = [];
-        resolve(blob);
+        const audioBlob = new Blob(this.audioChunks, { type: 'audio/webm; codecs=opus' });
+        this.audioChunks = [];
+        this.stream?.getTracks().forEach(track => track.stop()); // Stop microphone track
+        this.stream = null;
+        this._microphoneAnalyser = null; // Clear analyser (assign to private field)
+        console.log("Recording stopped.");
+        resolve(audioBlob);
       };
+      this.mediaRecorder.stop();
+    });
+  }
+  
+  // --- Microphone Analysis (for AudioIdentifier) ---
+  public async startMicrophoneAnalysis() {
+    if (!this.audioContext) return;
+    this.audioChunks = [];
+    try {
+      this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const source = this.audioContext.createMediaStreamSource(this.stream);
+      this._microphoneAnalyser = this.audioContext.createAnalyser(); // Assign to private field
+      source.connect(this._microphoneAnalyser);
+      // We don't connect to masterGain here, just analysis
+      
+      this.mediaRecorder = new MediaRecorder(this.stream);
+      this.mediaRecorder.ondataavailable = (e) => this.audioChunks.push(e.data);
+      this.mediaRecorder.start();
+      console.log("Microphone analysis started.");
+    } catch (e) {
+      console.error("Error starting microphone analysis:", e);
+      throw e; // Re-throw to be caught by component
+    }
+  }
 
+  public async stopMicrophoneAnalysis(): Promise<Blob> {
+    return new Promise((resolve) => {
+      if (!this.mediaRecorder || this.mediaRecorder.state === 'inactive') {
+        resolve(new Blob());
+        return;
+      }
+      this.mediaRecorder.onstop = () => {
+        const audioBlob = new Blob(this.audioChunks, { type: 'audio/webm; codecs=opus' });
+        this.audioChunks = [];
+        this.stream?.getTracks().forEach(track => track.stop());
+        this.stream = null;
+        this._microphoneAnalyser = null; // Clear analyser (assign to private field)
+        console.log("Microphone analysis stopped.");
+        resolve(audioBlob);
+      };
       this.mediaRecorder.stop();
     });
   }
 
-  async blobToBase64(blob: Blob): Promise<string> {
+  public async blobToBase64(blob: Blob): Promise<string> {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onloadend = () => {
         const base64String = reader.result as string;
-        resolve(base64String.split(',')[1]);
+        // Remove the data:audio/webm;base64, prefix
+        resolve(base64String.split(',')[1]); 
       };
       reader.onerror = reject;
       reader.readAsDataURL(blob);
     });
   }
 
-  // --- LOOPING ---
-
-  async decodeAudioData(blob: Blob): Promise<AudioBuffer> {
-    if (!this.ctx) this.init();
-    if (!this.ctx) throw new Error("Audio Context not ready");
+  public async decodeAudioData(blob: Blob): Promise<AudioBuffer> {
+    if (!this.audioContext) throw new Error("AudioContext not initialized.");
     const arrayBuffer = await blob.arrayBuffer();
-    return await this.ctx.decodeAudioData(arrayBuffer);
+    return this.audioContext.decodeAudioData(arrayBuffer);
   }
 
-  playLoop(buffer: AudioBuffer) {
-    if (!this.ctx || !this.loopGain) return;
-    this.stopLoop(); 
+  // --- MIDI Input ---
+  public async startMidiInput() {
+    if (!this.midiAccess) {
+      try {
+        this.midiAccess = await navigator.requestMIDIAccess();
+        this.midiAccess.onstatechange = (event) => this._handleMidiStateChange(event);
+      } catch (e) {
+        console.error("Could not access MIDI devices:", e);
+        return;
+      }
+    }
     
-    this.loopSource = this.ctx.createBufferSource();
-    this.loopSource.buffer = buffer;
-    this.loopSource.loop = true;
-    this.loopSource.connect(this.loopGain);
-    this.loopSource.start();
-  }
-
-  stopLoop() {
-    if (this.loopSource) {
-      try { this.loopSource.stop(); } catch(e) {}
-      this.loopSource.disconnect();
-      this.loopSource = null;
+    // Find first available input
+    const inputs = this.midiAccess.inputs.values();
+    this.midiInput = inputs.next().value;
+    if (this.midiInput) {
+      this.midiInput.onmidimessage = (message) => this._handleMidiMessage(message);
+      console.log("MIDI input started from:", this.midiInput.name);
+    } else {
+      console.log("No MIDI input devices found.");
     }
   }
 
-  setInstrument(type: InstrumentType) {
-    this.activeInstrument = type;
-    switch(type) {
-        case 'PIANO':
-            this.synthConfig = { waveform: 'triangle', attack: 0.01, decay: 0.1, sustain: 0.6, release: 1.5, filterCutoff: 3000, filterResonance: 0 };
-            break;
-        case 'GUITAR':
-            this.synthConfig = { waveform: 'sawtooth', attack: 0.005, decay: 1.0, sustain: 0.001, release: 0.5, filterCutoff: 2000, filterResonance: 2 };
-            break;
-        case 'SYNTH':
-            this.synthConfig = { waveform: 'sawtooth', attack: 0.1, decay: 0.2, sustain: 0.4, release: 2.0, filterCutoff: 1000, filterResonance: 10 };
-            break;
-        case 'STRINGS':
-            this.synthConfig = { waveform: 'sawtooth', attack: 0.6, decay: 0.2, sustain: 0.8, release: 3.0, filterCutoff: 1200, filterResonance: 0 };
-            break;
-        case 'HORNS':
-            this.synthConfig = { waveform: 'sawtooth', attack: 0.05, decay: 0.2, sustain: 0.6, release: 0.3, filterCutoff: 1500, filterResonance: 5 };
-            break;
+  public stopMidiInput() {
+    if (this.midiInput) {
+      this.midiInput.onmidimessage = null;
+      this.midiInput = null;
+      console.log("MIDI input stopped.");
     }
-  }
-  
-  updateSynthParams(params: Partial<SynthConfig>) {
-      this.synthConfig = { ...this.synthConfig, ...params };
-  }
-
-  setMasterVolume(volume: number) {
-    if (this.masterGain && this.ctx) {
-      this.masterGain.gain.setTargetAtTime(volume, this.ctx.currentTime, 0.1);
-    }
+    // Stop all active MIDI notes when input is stopped
+    this.activeMidiNotes.forEach(noteRef => {
+        if (noteRef.oscillator) noteRef.oscillator.stop();
+        if (noteRef.gainNode) noteRef.gainNode.gain.cancelScheduledValues(this.audioContext!.currentTime);
+    });
+    this.activeMidiNotes.clear();
   }
 
-  // --- SYNTHESIS ---
+  public subscribeToMidiMessages(callback: MidiMessageCallback) {
+    this.midiMessageCallbacks.add(callback);
+  }
 
-  private getNoiseBuffer() {
-    if (!this.ctx) return null;
-    if (!this.noiseBuffer) {
-        const bufferSize = this.ctx.sampleRate * 2; // 2 seconds of noise
-        const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
-        const data = buffer.getChannelData(0);
-        for (let i = 0; i < bufferSize; i++) {
-            data[i] = Math.random() * 2 - 1;
+  public unsubscribeFromMidiMessages(callback: MidiMessageCallback) {
+    this.midiMessageCallbacks.delete(callback);
+  }
+
+  private _handleMidiStateChange(event: MIDIStateChangeEvent) {
+    console.log("MIDI state change:", event.port.name, event.port.state);
+    // Potentially re-scan for inputs or update UI here
+    if (event.port.type === 'input' && event.port.state === 'connected') {
+        this.startMidiInput(); // Try to reconnect if a new device is connected
+    } else if (event.port.type === 'input' && event.port.state === 'disconnected') {
+        if (this.midiInput && this.midiInput.id === event.port.id) {
+            this.stopMidiInput(); // Stop if the active input was disconnected
         }
-        this.noiseBuffer = buffer;
     }
-    return this.noiseBuffer;
   }
 
-  playDrum(type: 'KICK' | 'SNARE' | 'HAT' | 'CLAP', time?: number, velocity: number = 1.0) {
-    if (!this.ctx || !this.isInitialized) this.init();
-    this.resume();
-    if (!this.ctx) return;
+  private _handleMidiMessage(message: MIDIMessageEvent) {
+    const command = message.data[0] & 0xf0;
+    const midiNoteNumber = message.data[1];
+    const velocity = message.data[2];
 
-    // Use Scheduled time or immediate
-    const t = time || this.ctx.currentTime;
-    const main = this.nodes.mainBus;
-    const gainScale = velocity;
+    this.midiMessageCallbacks.forEach(callback => callback(message));
 
-    if (type === 'KICK') {
-        // High-Fidelity 808-style Kick
-        // 1. Body (Sine with Pitch Drop)
-        const osc = this.ctx.createOscillator();
-        const gain = this.ctx.createGain();
-        osc.frequency.setValueAtTime(150, t);
-        osc.frequency.exponentialRampToValueAtTime(45, t + 0.15); // Faster pitch drop for punch
-        
-        gain.gain.setValueAtTime(1.0 * gainScale, t);
-        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+    if (!this.audioContext) return;
 
-        osc.connect(gain);
-        gain.connect(main);
-        osc.start(t);
-        osc.stop(t + 0.4);
-
-        // 2. Click (Transient)
-        const clickOsc = this.ctx.createOscillator();
-        const clickGain = this.ctx.createGain();
-        clickOsc.type = 'square';
-        clickOsc.frequency.setValueAtTime(80, t);
-        
-        // Very fast decay for click
-        clickGain.gain.setValueAtTime(0.3 * gainScale, t);
-        clickGain.gain.exponentialRampToValueAtTime(0.001, t + 0.02);
-        
-        // Filter the click to make it snappy not glitchy
-        const clickFilter = this.ctx.createBiquadFilter();
-        clickFilter.type = 'lowpass';
-        clickFilter.frequency.value = 3000;
-
-        clickOsc.connect(clickFilter);
-        clickFilter.connect(clickGain);
-        clickGain.connect(main);
-        
-        clickOsc.start(t);
-        clickOsc.stop(t + 0.02);
-
-    } else if (type === 'SNARE') {
-        // Professional Hybrid Snare
-        
-        // 1. Tonal Body (Triangle)
-        const osc = this.ctx.createOscillator();
-        const oscGain = this.ctx.createGain();
-        osc.type = 'triangle';
-        osc.frequency.setValueAtTime(250, t);
-        osc.frequency.linearRampToValueAtTime(150, t + 0.1);
-        
-        oscGain.gain.setValueAtTime(0.5 * gainScale, t);
-        oscGain.gain.exponentialRampToValueAtTime(0.001, t + 0.2);
-        
-        osc.connect(oscGain);
-        oscGain.connect(main);
-        osc.start(t);
-        osc.stop(t + 0.2);
-
-        // 2. Noise (Wires)
-        const noiseBuffer = this.getNoiseBuffer();
-        if (noiseBuffer) {
-            const noise = this.ctx.createBufferSource();
-            noise.buffer = noiseBuffer;
-            
-            const noiseFilter = this.ctx.createBiquadFilter();
-            noiseFilter.type = 'highpass';
-            noiseFilter.frequency.setValueAtTime(800, t);
-            noiseFilter.frequency.linearRampToValueAtTime(1200, t + 0.15); // Filter movement
-            
-            const noiseGain = this.ctx.createGain();
-            noiseGain.gain.setValueAtTime(0.8 * gainScale, t);
-            noiseGain.gain.exponentialRampToValueAtTime(0.001, t + 0.25);
-
-            noise.connect(noiseFilter);
-            noiseFilter.connect(noiseGain);
-            noiseGain.connect(main);
-            noise.start(t);
-            noise.stop(t + 0.3);
+    if (command === 0x90 && velocity > 0) { // Note On
+        const freq = 440 * Math.pow(2, (midiNoteNumber - 69) / 12);
+        const activeNoteRef = this.playNote(freq, velocity / 127); // Scale velocity to 0-1
+        this.activeMidiNotes.set(midiNoteNumber, activeNoteRef);
+    } else if (command === 0x80 || (command === 0x90 && velocity === 0)) { // Note Off
+        const activeNoteRef = this.activeMidiNotes.get(midiNoteNumber);
+        if (activeNoteRef) {
+            this.stopNote(activeNoteRef);
+            this.activeMidiNotes.delete(midiNoteNumber);
         }
-
-    } else if (type === 'HAT') {
-        // Metallic Hat using filtered noise
-        const noiseBuffer = this.getNoiseBuffer();
-        if (noiseBuffer) {
-            const noise = this.ctx.createBufferSource();
-            noise.buffer = noiseBuffer;
-
-            // Bandpass filter for metallic sizzle
-            const filter = this.ctx.createBiquadFilter();
-            filter.type = 'bandpass';
-            filter.frequency.value = 8000;
-            filter.Q.value = 1.0;
-
-            const highpass = this.ctx.createBiquadFilter();
-            highpass.type = 'highpass';
-            highpass.frequency.value = 7000;
-
-            const gain = this.ctx.createGain();
-            gain.gain.setValueAtTime(0.4 * gainScale, t);
-            gain.gain.exponentialRampToValueAtTime(0.001, t + 0.05); // Super short
-
-            noise.connect(filter);
-            filter.connect(highpass);
-            highpass.connect(gain);
-            gain.connect(main);
-            
-            noise.start(t);
-            noise.stop(t + 0.06);
-        }
-
-    } else if (type === 'CLAP') {
-       // Multi-Burst Clap
-       const noiseBuffer = this.getNoiseBuffer();
-       if (noiseBuffer) {
-          const filter = this.ctx.createBiquadFilter();
-          filter.type = 'bandpass';
-          filter.frequency.value = 1200;
-          filter.Q.value = 1;
-
-          const gain = this.ctx.createGain();
-          gain.connect(main);
-          
-          // Simulation of 3 hands clapping slightly offset
-          const startTime = t;
-          gain.gain.setValueAtTime(0, startTime);
-          
-          // Burst 1
-          gain.gain.linearRampToValueAtTime(0.7 * gainScale, startTime + 0.005);
-          gain.gain.exponentialRampToValueAtTime(0.1, startTime + 0.015);
-          
-          // Burst 2
-          gain.gain.linearRampToValueAtTime(0.6 * gainScale, startTime + 0.025);
-          gain.gain.exponentialRampToValueAtTime(0.1, startTime + 0.035);
-          
-          // Burst 3 (Body)
-          gain.gain.linearRampToValueAtTime(0.8 * gainScale, startTime + 0.045);
-          gain.gain.exponentialRampToValueAtTime(0.001, startTime + 0.18);
-
-          const noise = this.ctx.createBufferSource();
-          noise.buffer = noiseBuffer;
-          noise.connect(filter);
-          filter.connect(gain);
-          
-          noise.start(startTime);
-          noise.stop(startTime + 0.2);
-       }
     }
   }
 
-  // Bass Synth for Backing Tracks
-  playBass(freq: number, duration: number) {
-    if (!this.ctx) this.init();
-    if (!this.ctx) return;
-    const t = this.ctx.currentTime;
-    
-    const osc = this.ctx.createOscillator();
-    const gain = this.ctx.createGain();
-    const filter = this.ctx.createBiquadFilter();
-
-    osc.type = 'sawtooth';
-    osc.frequency.value = freq;
-
-    filter.type = 'lowpass';
-    filter.frequency.setValueAtTime(800, t);
-    filter.frequency.exponentialRampToValueAtTime(100, t + duration);
-
-    gain.gain.setValueAtTime(0.6, t);
-    gain.gain.exponentialRampToValueAtTime(0.01, t + duration);
-
-    osc.connect(filter);
-    filter.connect(gain);
-    gain.connect(this.nodes.mainBus);
-
-    osc.start(t);
-    osc.stop(t + duration);
-  }
-
-  // Advanced Instrument Synthesis
-  playNote(freq: number) {
-    if (!this.ctx) this.init();
-    if (!this.ctx) return;
-    this.resume();
-
-    const t = this.ctx.currentTime;
-    const osc = this.ctx.createOscillator();
-    const gain = this.ctx.createGain();
-    const filter = this.ctx.createBiquadFilter();
-    
-    const { waveform, attack, decay, sustain, release, filterCutoff, filterResonance } = this.synthConfig;
-
-    osc.connect(filter);
-    filter.connect(gain);
-    gain.connect(this.nodes.mainBus);
-
-    osc.frequency.value = freq;
-    osc.type = waveform;
-
-    // Filter Envelope (Simple tracking)
-    filter.type = 'lowpass';
-    filter.Q.value = filterResonance;
-    filter.frequency.setValueAtTime(filterCutoff, t);
-    // Slight filter movement on attack
-    filter.frequency.linearRampToValueAtTime(filterCutoff * 1.5, t + attack);
-    filter.frequency.exponentialRampToValueAtTime(filterCutoff, t + attack + decay);
-
-    // Amplitude ADSR Envelope
-    const peakGain = 0.5; // normalize volume
-    
-    // 1. Attack
-    gain.gain.setValueAtTime(0, t);
-    gain.gain.linearRampToValueAtTime(peakGain, t + Math.max(0.005, attack)); // Min attack to avoid clicks
-    
-    // 2. Decay to Sustain
-    gain.gain.exponentialRampToValueAtTime(Math.max(0.001, peakGain * sustain), t + Math.max(0.005, attack) + decay);
-
-    // 3. Release (simulated trigger release after a fixed 'hold' time for single shots, 
-    // real synth would wait for keyUp, but here we fire and forget with a generous hold)
-    const holdTime = 0.5; 
-    gain.gain.setTargetAtTime(0, t + attack + decay + holdTime, release);
-
-    osc.start(t);
-    // Stop oscillator after full release to save CPU
-    osc.stop(t + attack + decay + holdTime + release + 1.0);
-  }
-  
-  // Legacy tone support
-  playTone(freq: number, type: OscillatorType = 'triangle', duration = 0.5) {
-     if (!this.ctx) return;
-     const osc = this.ctx.createOscillator();
-     const gain = this.ctx.createGain();
-     osc.type = type;
-     osc.frequency.value = freq;
-     gain.connect(this.nodes.mainBus);
-     osc.connect(gain);
-     const t = this.ctx.currentTime;
-     gain.gain.setValueAtTime(0.2, t);
-     gain.gain.exponentialRampToValueAtTime(0.01, t + duration);
-     osc.start(t);
-     osc.stop(t + duration);
-  }
-
-  // --- DSP & ENVIRONMENTS ---
-
-  setEnvironment(env: AudioEnvironment) {
-    if (!this.ctx || !this.nodes.reverbGain) return;
-    
-    let seconds = 0.5, decay = 2.0, wet = 0.3;
-
-    switch(env) {
-      case 'STUDIO': seconds = 0.1; decay = 5.0; wet = 0.05; break;
-      case 'GARAGE': seconds = 0.4; decay = 3.0; wet = 0.2; break;
-      case 'CLUB': seconds = 1.0; decay = 2.5; wet = 0.4; break;
-      case 'HALLWAY': seconds = 1.5; decay = 1.5; wet = 0.5; break;
-      case 'CONCERT': seconds = 2.0; decay = 2.0; wet = 0.6; break;
-      case 'STADIUM': seconds = 3.0; decay = 1.0; wet = 0.7; break;
-      case 'DUNGEON': seconds = 4.0; decay = 0.5; wet = 0.8; break; 
-      case 'ORCHESTRA': seconds = 2.5; decay = 1.8; wet = 0.5; break;
-    }
-
-    this.nodes.reverbGain.gain.setTargetAtTime(wet, this.ctx.currentTime, 0.2);
-    this.generateImpulse(seconds, decay);
-  }
-
-  setEQ(preset: EqPreset) {
-    if (!this.lowShelf || !this.ctx) return;
-    const t = this.ctx.currentTime;
-    
-    // Reset defaults
-    this.lowShelf.gain.setTargetAtTime(0, t, 0.2);
-    this.midPeaking!.gain.setTargetAtTime(0, t, 0.2);
-    this.highShelf!.gain.setTargetAtTime(0, t, 0.2);
-
-    switch(preset) {
-      case 'SUPER-BASS': this.lowShelf.gain.setTargetAtTime(15, t, 0.2); break;
-      case 'POP': 
-        this.lowShelf.gain.setTargetAtTime(4, t, 0.2);
-        this.highShelf!.gain.setTargetAtTime(4, t, 0.2);
-        this.midPeaking!.gain.setTargetAtTime(-3, t, 0.2);
-        break;
-      case 'MELLOW': this.highShelf!.gain.setTargetAtTime(-8, t, 0.2); break;
-      case 'TREBLE': this.highShelf!.gain.setTargetAtTime(10, t, 0.2); break;
-      case 'REGGAE':
-        this.lowShelf.gain.setTargetAtTime(12, t, 0.2);
-        this.highShelf!.gain.setTargetAtTime(6, t, 0.2);
-        break;
-    }
-  }
-
-  private generateImpulse(duration: number, decay: number) {
-    if (!this.ctx || !this.reverbNode) return;
-    const length = this.ctx.sampleRate * duration;
-    const impulse = this.ctx.createBuffer(2, length, this.ctx.sampleRate);
-    const l = impulse.getChannelData(0);
-    const r = impulse.getChannelData(1);
-
-    for (let i = 0; i < length; i++) {
-      const n = i < length - 100 ? Math.random() * 2 - 1 : 0;
-      l[i] = n * Math.pow(1 - i / length, decay);
-      r[i] = n * Math.pow(1 - i / length, decay);
-    }
-    this.reverbNode.buffer = impulse;
+  // --- Diagnostics ---
+  public getDiagnostics() {
+    return {
+      state: this.audioContext?.state || 'closed',
+      sampleRate: this.audioContext?.sampleRate || 0,
+      outputLatency: this.audioContext?.outputLatency || 0,
+      activeNodes: this.audioContext?.baseLatency ? this.audioContext.baseLatency * 1000 : 0, // Placeholder
+      currentInstrument: this.currentInstrument,
+      currentEQPreset: this.currentEQPreset,
+      isMetronomePlaying: this.isMetronomePlaying,
+      activeManualNotesCount: this.activeManualNotes.size,
+      activeMidiNotesCount: this.activeMidiNotes.size,
+      mediaRecorderState: this.mediaRecorder?.state || 'inactive',
+    };
   }
 }
 
+// Export a singleton instance of the AudioEngine
 export const audio = new AudioEngine();

@@ -1,4 +1,5 @@
 
+
 import React, { useState } from 'react';
 import { ArrowRight, Check, Sparkles, LayoutGrid, Zap, ChevronLeft } from 'lucide-react';
 
@@ -53,13 +54,16 @@ export const OnboardingTour: React.FC<TourProps> = ({ onComplete }) => {
                 <div className="absolute -top-24 -right-24 w-48 h-48 bg-cyan-500/10 rounded-full blur-3xl"></div>
                 <div className="absolute -bottom-24 -left-24 w-48 h-48 bg-purple-500/10 rounded-full blur-3xl"></div>
 
+                {/* Cymatic Wave Effect for the first step */}
+                {safeStep === 0 && <div className="cymatic-wave"></div>}
+
                 {/* Icon */}
-                <div className={`w-20 h-20 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center mb-6 shadow-xl ${current.color} transition-all duration-300 transform`}>
+                <div className={`w-20 h-20 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center mb-6 shadow-xl ${current.color} transition-all duration-300 transform z-10`}>
                     <Icon className="w-10 h-10" />
                 </div>
 
                 {/* Content */}
-                <div className="flex-1 flex flex-col items-center justify-start w-full">
+                <div className="flex-1 flex flex-col items-center justify-start w-full z-10">
                     <h3 className="text-2xl font-bold text-white mb-3 transition-all duration-300">{current.title}</h3>
                     <p className="text-slate-400 text-lg leading-relaxed mb-8 transition-all duration-300">
                         {current.desc}

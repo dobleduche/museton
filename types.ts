@@ -49,6 +49,7 @@ export interface UserPreferences {
   autoSave: boolean;
   metronomeVolume: number;
   masterTuning: number;
+  midiEnabled?: boolean; // New: MIDI Input
 }
 
 export interface Tutor {

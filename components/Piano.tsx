@@ -1,13 +1,15 @@
 import React, { useMemo, useEffect, useRef, useState } from 'react';
 import { TheoryData } from '../types';
 import { audio } from '../services/audioEngine';
-import { PlayCircle } from 'lucide-react';
+import { PlayCircle, Usb, Circle } from 'lucide-react';
 
 interface PianoProps {
   data: TheoryData | null;
   tuning: number; // Master tuning (e.g. 440)
   targetNotes?: string[]; // For Practice Mode
   onPlayNote?: (note: string) => void; // New callback for scoring
+  midiEnabled: boolean; // New prop to control MIDI activation
+  midiStatus: 'connected' | 'disconnected' | 'unsupported'; // New prop for MIDI status
 }
 
 const NOTES_SHARP = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
@@ -25,14 +27,21 @@ const toSharp = (note: string): string => {
 const getFrequency = (note: string, octave: number, tuning: number) => {
   const sharpNote = toSharp(note);
   const noteIndex = NOTES_SHARP.indexOf(sharpNote); 
-  // Formula: Freq = Tuning * 2^((n - 49) / 12) where n is MIDI note number.
-  // A4 (Octave 4, Index 9) is MIDI 69.
-  // Our C0 starts MIDI 12.
   const midi = (octave + 1) * 12 + noteIndex;
-  // A4 is 69.
-  // Offset from A4:
-  const offset = midi - 69;
+  const offset = midi - 69; // Offset from A4 (MIDI 69)
   return tuning * Math.pow(2, offset / 12);
+};
+
+const midiToFreq = (midiNote: number, tuning: number) => {
+  return tuning * Math.pow(2, (midiNote - 69) / 12);
+};
+
+const freqToNoteString = (freq: number, tuning: number): string => {
+  const midi = 69 + 12 * Math.log2(freq / tuning);
+  const roundedMidi = Math.round(midi);
+  const noteIndex = roundedMidi % 12;
+  const octave = Math.floor(roundedMidi / 12) - 1;
+  return `${NOTES_SHARP[noteIndex]}${octave}`;
 };
 
 const normalize = (note: string) => note.replace(/[0-9]/g, '').trim();
@@ -45,343 +54,253 @@ const KEYBOARD_MAP: Record<string, string> = {
   't': 'G4', '6': 'G#4', 'y': 'A4', '7': 'A#4', 'u': 'B4'
 };
 
-const getIntervalColor = (interval: string) => {
-  if (interval === 'R' || interval === '1') return 'text-amber-500 font-black'; // Root
-  if (interval.includes('3')) return 'text-cyan-500 font-bold'; // Thirds
-  if (interval.includes('5')) return 'text-purple-500 font-bold'; // Fifths
-  if (interval.includes('7')) return 'text-pink-500 font-bold'; // Sevenths
-  return 'text-slate-400 font-medium'; // Extensions/Others
-};
+interface ActiveNoteInstance {
+  fullNote: string;
+  activeNoteRef: any; // Reference to the object returned by audio.playNote
+}
 
-const getKeyStyle = (interval: string | null, isBlack: boolean, isPlaying: boolean, isTarget: boolean) => {
-    // 1. Playing State (Highest Priority)
-    if (isPlaying) {
-        return isBlack 
-            ? 'from-slate-700 to-cyan-900 key-active border-cyan-500/50' 
-            : 'bg-cyan-100 key-active !border-b-0 !shadow-none';
-    }
+export const Piano: React.FC<PianoProps> = ({ data, tuning, targetNotes = [], onPlayNote, midiEnabled, midiStatus }) => {
+  const [activeNotes, setActiveNotes] = useState<Set<string>>(new Set());
+  const [lastPlayedNote, setLastPlayedNote] = useState<string | null>(null);
+  const activeKeyInstances = useRef<Map<string, ActiveNoteInstance>>(new Map()); // Map fullNote string to ActiveNoteInstance
 
-    // 2. Practice Mode Target (Next Priority)
-    if (isTarget) {
-        return isBlack
-            ? 'border-red-500/50 from-red-900/60 to-black animate-pulse'
-            : 'bg-red-50 shadow-[inset_0_-20px_40px_rgba(239,68,68,0.2)] !border-b-red-400 animate-pulse';
-    }
+  const getIntervalColor = (interval: string) => {
+    if (interval === 'R' || interval === '1') return 'text-amber-500 font-black'; // Root
+    if (interval.includes('3')) return 'text-emerald-500'; // Third
+    if (interval.includes('5')) return 'text-purple-500'; // Fifth
+    return 'text-white/70'; // Other intervals
+  };
 
-    // 3. Inactive/Default
-    if (!interval) {
-        return isBlack ? '' : 'hover:bg-gray-50';
-    }
-
-    // 4. Theory Interval Colors
-    let type = 'default';
-    if (interval === 'R' || interval === '1') type = 'root';
-    else if (interval.includes('3')) type = 'third';
-    else if (interval.includes('5')) type = 'fifth';
-    else if (interval.includes('7')) type = 'seventh';
-
-    if (isBlack) {
-        switch (type) {
-            case 'root': return 'from-amber-900/60 to-black border-b-2 border-amber-500 shadow-[0_0_15px_rgba(245,158,11,0.4)]';
-            case 'third': return 'from-cyan-900/60 to-black border-b-2 border-cyan-500 shadow-[0_0_15px_rgba(34,211,238,0.4)]';
-            case 'fifth': return 'from-purple-900/60 to-black border-b-2 border-purple-500 shadow-[0_0_15px_rgba(168,85,247,0.4)]';
-            case 'seventh': return 'from-pink-900/60 to-black border-b-2 border-pink-500 shadow-[0_0_15px_rgba(236,72,153,0.4)]';
-            default: return 'border-b-2 border-indigo-500 from-indigo-900/40 to-black';
+  const whiteKeys = useMemo(() => {
+    const keys = [];
+    for (let octave = 2; octave <= 5; octave++) {
+      ['C', 'D', 'E', 'F', 'G', 'A', 'B'].forEach(note => {
+        if (!['C2', 'B5'].includes(`${note}${octave}`)) { 
+           keys.push({ note, octave, type: 'white' });
         }
-    } else {
-        switch (type) {
-            case 'root': return 'bg-amber-50 shadow-[inset_0_-20px_40px_rgba(245,158,11,0.3)] border-b-4 border-amber-400';
-            case 'third': return 'bg-cyan-50 shadow-[inset_0_-20px_40px_rgba(6,182,212,0.3)] border-b-4 border-cyan-400';
-            case 'fifth': return 'bg-purple-50 shadow-[inset_0_-20px_40px_rgba(168,85,247,0.3)] border-b-4 border-purple-400';
-            case 'seventh': return 'bg-pink-50 shadow-[inset_0_-20px_40px_rgba(236,72,153,0.3)] border-b-4 border-pink-400';
-            default: return 'bg-indigo-50 shadow-[inset_0_-20px_40px_rgba(99,102,241,0.2)]';
-        }
+      });
     }
-};
-
-export const Piano: React.FC<PianoProps> = ({ data, tuning = 440, targetNotes = [], onPlayNote }) => {
-  const startOctave = 3;
-  const octaveCount = 2;
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const [playingKeys, setPlayingKeys] = useState<Set<string>>(new Set());
-
-  // Audio Visualizer
-  useEffect(() => {
-    let animationId: number;
-    const canvas = canvasRef.current;
-    if (canvas) {
-      const ctx = canvas.getContext('2d');
-      const analyser = audio.analyser;
-      const draw = () => {
-        animationId = requestAnimationFrame(draw);
-        if (!analyser || !ctx) return;
-        const bufferLength = analyser.frequencyBinCount;
-        const dataArray = new Uint8Array(bufferLength);
-        analyser.getByteTimeDomainData(dataArray);
-
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.lineWidth = 2;
-        ctx.strokeStyle = '#22d3ee';
-        ctx.shadowBlur = 10;
-        ctx.shadowColor = '#22d3ee';
-        ctx.beginPath();
-        const sliceWidth = canvas.width / bufferLength;
-        let x = 0;
-        for (let i = 0; i < bufferLength; i++) {
-          const v = dataArray[i] / 128.0;
-          const y = (v * canvas.height) / 2;
-          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-          x += sliceWidth;
-        }
-        ctx.stroke();
-      };
-      draw();
-    }
-    return () => cancelAnimationFrame(animationId);
+    return keys;
   }, []);
 
-  const playNoteByStr = (noteWithOctave: string) => {
-    // noteWithOctave like "C3" or "F#4"
-    const match = noteWithOctave.match(/([A-G]#?)([0-9])/);
-    if (match) {
-      const note = match[1];
-      const oct = parseInt(match[2]);
-      const freq = getFrequency(note, oct, tuning);
-      audio.playNote(freq);
-      if (onPlayNote) onPlayNote(noteWithOctave);
+  const blackKeys = useMemo(() => {
+    const keys = [];
+    for (let octave = 2; octave <= 5; octave++) {
+      ['C#', 'D#', 'F#', 'G#', 'A#'].forEach(note => {
+        if (!['C#2', 'D#2', 'F#2', 'G#2', 'A#2', 'C#5', 'D#5', 'F#5', 'G#5', 'A#5'].includes(`${note}${octave}`)) {
+            keys.push({ note, octave, type: 'black' });
+        }
+      });
     }
+    return keys;
+  }, []);
+
+  const allKeys = useMemo(() => {
+    return [...whiteKeys, ...blackKeys].sort((a, b) => {
+      const freqA = getFrequency(a.note, a.octave, tuning);
+      const freqB = getFrequency(b.note, b.octave, tuning);
+      return freqA - freqB;
+    });
+  }, [whiteKeys, blackKeys, tuning]);
+
+  const getNoteColor = (fullNote: string) => {
+    if (!data) return '';
+    const normalizedDataNote = toSharp(normalize(fullNote));
+    const dataNotesNormalized = data.notes.map(n => toSharp(normalize(n)));
+    const index = dataNotesNormalized.indexOf(normalizedDataNote);
+
+    if (index !== -1) {
+      return getIntervalColor(data.intervals[index]);
+    }
+    return '';
   };
 
-  const handleManualPlay = (keyName: string, octave: number, keyId: string) => {
-    const freq = getFrequency(keyName, octave, tuning);
-    audio.playNote(freq);
-    if (onPlayNote) onPlayNote(keyId);
+  // --- Note Playback Logic ---
+  const startNote = (fullNote: string, freq: number, velocity: number = 1.0) => {
+    // If note is already playing from another source (e.g. keyboard then MIDI), stop it first
+    if (activeKeyInstances.current.has(fullNote)) {
+      audio.stopNote(activeKeyInstances.current.get(fullNote)!.activeNoteRef);
+      activeKeyInstances.current.delete(fullNote);
+    }
     
-    setPlayingKeys(prev => new Set(prev).add(keyId));
-    setTimeout(() => {
-      setPlayingKeys(prev => {
-        const next = new Set(prev);
-        next.delete(keyId);
-        return next;
-      });
-    }, 200);
+    const activeNoteRef = audio.playNote(freq, velocity); // No duration means it sustains
+    activeKeyInstances.current.set(fullNote, { fullNote, activeNoteRef });
+
+    setLastPlayedNote(fullNote);
+    if (onPlayNote) onPlayNote(fullNote);
+    
+    setActiveNotes(prev => new Set(prev.add(fullNote)));
   };
 
-  // Auto-Play Scale Sequence
-  const handleAutoPlay = async () => {
-      if (!data) return;
-      
-      // Map theory notes to real keys (starting from C3 area)
-      const baseOctave = 3;
-      
-      const sequence: { note: string, oct: number }[] = [];
-      let currentOctave = baseOctave;
-      let lastIndex = -1;
+  const stopNote = (fullNote: string) => {
+    const activeInstance = activeKeyInstances.current.get(fullNote);
+    if (activeInstance) {
+      audio.stopNote(activeInstance.activeNoteRef);
+      activeKeyInstances.current.delete(fullNote);
+    }
 
-      data.notes.forEach(n => {
-          const norm = normalize(n);
-          // Convert to sharp to find position in standard octave array
-          const sharpNorm = toSharp(norm);
-          const index = NOTES_SHARP.indexOf(sharpNorm);
-          
-          if (index < lastIndex) currentOctave++;
-          lastIndex = index;
-          // Use the original name for display if possible, but sharp for ID mapping
-          sequence.push({ note: sharpNorm, oct: currentOctave });
-      });
-
-      // Play Sequence
-      for (let i = 0; i < sequence.length; i++) {
-          const item = sequence[i];
-          const keyId = `${item.note}${item.oct}`;
-          handleManualPlay(item.note, item.oct, keyId);
-          await new Promise(r => setTimeout(r, 400)); // Delay
-      }
-      
-      // Play Chord if it's a chord type
-      if (data.type === 'chord') {
-          await new Promise(r => setTimeout(r, 400));
-          sequence.forEach(item => {
-              const freq = getFrequency(item.note, item.oct, tuning);
-              audio.playNote(freq);
-              const keyId = `${item.note}${item.oct}`;
-              setPlayingKeys(prev => new Set(prev).add(keyId));
-          });
-          setTimeout(() => setPlayingKeys(new Set()), 1000);
-      }
+    setActiveNotes(prev => {
+      const newSet = new Set(prev);
+      newSet.delete(fullNote);
+      return newSet;
+    });
   };
 
-  // Keyboard Listeners
+  const playNoteByStr = (noteStr: string, velocity: number = 1.0) => {
+    const match = noteStr.match(/([A-G]#?b?)([0-9])/);
+    if (!match) return;
+
+    const noteName = match[1];
+    const octave = parseInt(match[2]);
+    const freq = getFrequency(noteName, octave, tuning);
+    
+    startNote(noteStr, freq, velocity);
+  };
+  
+  const handleManualPlay = (noteName: string, octave: number, velocity: number = 1.0) => {
+    const fullNote = `${noteName}${octave}`;
+    const freq = getFrequency(noteName, octave, tuning);
+    
+    startNote(fullNote, freq, velocity);
+  };
+
+  // --- MIDI Input ---
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.repeat) return; // Ignore hold
-      const key = e.key.toLowerCase();
-      if (KEYBOARD_MAP[key]) {
-        const mapped = KEYBOARD_MAP[key]; // e.g., "C3"
-        playNoteByStr(mapped);
-        setPlayingKeys(prev => new Set(prev).add(mapped));
-      }
-    };
-    const handleKeyUp = (e: KeyboardEvent) => {
-      const key = e.key.toLowerCase();
-      if (KEYBOARD_MAP[key]) {
-        const mapped = KEYBOARD_MAP[key];
-        setPlayingKeys(prev => {
-           const next = new Set(prev);
-           next.delete(mapped);
-           return next;
+    const handleMidiMessage = (message: MIDIMessageEvent) => {
+      const command = message.data[0] & 0xf0;
+      const midiNoteNumber = message.data[1];
+      const freq = midiToFreq(midiNoteNumber, tuning);
+      const fullNote = freqToNoteString(freq, tuning);
+      const velocity = message.data[2];
+
+      if (command === 0x90 && velocity > 0) { // Note On
+        setLastPlayedNote(fullNote);
+        if (onPlayNote) onPlayNote(fullNote);
+        setActiveNotes(prev => new Set(prev.add(fullNote)));
+      } else if (command === 0x80 || (command === 0x90 && velocity === 0)) { // Note Off
+        setActiveNotes(prev => {
+          const newSet = new Set(prev);
+          newSet.delete(fullNote);
+          return newSet;
         });
       }
     };
+
+    if (midiEnabled) {
+      audio.subscribeToMidiMessages(handleMidiMessage);
+      audio.startMidiInput();
+    } else {
+      audio.stopMidiInput();
+      audio.unsubscribeFromMidiMessages(handleMidiMessage);
+    }
+
+    return () => {
+      audio.stopMidiInput();
+      audio.unsubscribeFromMidiMessages(handleMidiMessage);
+    };
+  }, [midiEnabled, tuning, onPlayNote]);
+
+  // --- Keyboard Listener (Computer Keyboard) ---
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const note = KEYBOARD_MAP[e.key.toLowerCase()];
+      if (note && !activeNotes.has(note)) {
+        playNoteByStr(note);
+      }
+    };
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      const note = KEYBOARD_MAP[e.key.toLowerCase()];
+      if (note) {
+        stopNote(note);
+      }
+    };
+
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
+
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [tuning]); 
-
-  // Helper to find interval from Theory Data with Enharmonic Check
-  const getInterval = (keyName: string) => {
-    if (!data) return null;
-    
-    // We compare the KEY (always sharp in our map, e.g., "C#") to DATA (might be "Db")
-    // So we normalize DATA notes to SHARP
-    const index = data.notes.findIndex(n => toSharp(normalize(n)) === keyName);
-    return index !== -1 ? data.intervals[index] : null;
-  };
-
-  // Generate Key Objects
-  const keys = useMemo(() => {
-    const generatedKeys = [];
-    for (let o = 0; o < octaveCount; o++) {
-      const octaveNum = startOctave + o;
-      for (let i = 0; i < 12; i++) {
-        const isSharp = NOTES_SHARP[i].includes('#');
-        generatedKeys.push({
-          noteIndex: i,
-          octave: octaveNum,
-          primaryName: NOTES_SHARP[i],
-          isBlack: isSharp,
-          id: `${NOTES_SHARP[i]}${octaveNum}`
-        });
-      }
-    }
-    // High C
-    generatedKeys.push({ noteIndex: 0, octave: startOctave + octaveCount, primaryName: 'C', isBlack: false, id: `C${startOctave + octaveCount}` });
-    return generatedKeys;
-  }, []);
+  }, [activeNotes, tuning, onPlayNote]);
 
   return (
-    <div className="relative w-full glass-panel rounded-2xl overflow-hidden group perspective-[1200px] border border-white/10">
-      {/* Visualizer Header */}
-      <div className="h-20 bg-black/40 border-b border-white/5 relative flex items-center justify-center overflow-hidden">
-        <canvas ref={canvasRef} width={600} height={80} className="absolute inset-0 w-full h-full opacity-80" />
-        <div className="absolute inset-0 scanline opacity-20"></div>
-        <div className="absolute top-2 left-3 text-[10px] text-cyan-500/50 font-mono tracking-[0.2em] flex gap-2 z-10">
-           <span>OSCILLATOR VISUALIZATION</span>
-           <span className="text-white/30">|</span>
-           <span>TUNING: {tuning}Hz</span>
-           <span className="animate-pulse ml-2 text-cyan-400">● REC READY</span>
-        </div>
-        
-        {/* Auto Play Button */}
-        {data && (
-            <button 
-                onClick={handleAutoPlay}
-                className="absolute right-4 top-1/2 -translate-y-1/2 bg-cyan-900/40 hover:bg-cyan-500 hover:text-black text-cyan-400 border border-cyan-500/30 rounded-full px-4 py-2 flex items-center gap-2 text-xs font-bold transition-all z-20"
-            >
-                <PlayCircle className="w-4 h-4" /> PREVIEW
-            </button>
-        )}
-      </div>
-      
-      {/* Keys Container */}
-      <div className="relative h-64 flex justify-center px-4 pt-2 bg-gradient-to-b from-slate-900/90 to-black/80 backdrop-blur-md">
-        <div className="relative flex h-full shadow-2xl">
-          {/* White Keys */}
-          {keys.filter(k => !k.isBlack).map((key) => {
-             const isPlaying = playingKeys.has(key.id);
-             const interval = getInterval(key.primaryName);
-             const isTarget = targetNotes.includes(key.id) || targetNotes.some(t => toSharp(normalize(t)) === key.primaryName);
-             
-             return (
-               <div
-                 key={key.id}
-                 onMouseDown={() => handleManualPlay(key.primaryName, key.octave, key.id)}
-                 onTouchStart={(e) => { e.preventDefault(); handleManualPlay(key.primaryName, key.octave, key.id); }}
-                 className={`
-                   relative w-12 md:w-16 h-full 
-                   bg-white/95 backdrop-blur-sm
-                   border-x border-b border-slate-300/50 rounded-b-lg mx-[1px]
-                   shadow-[inset_0_-15px_20px_rgba(0,0,0,0.1),0_5px_5px_rgba(0,0,0,0.2)]
-                   transition-all duration-75 ease-out
-                   flex flex-col justify-end items-center pb-4 cursor-pointer
-                   piano-key z-10
-                   ${getKeyStyle(interval, false, isPlaying, isTarget)}
-                 `}
-               >
-                  <div className="flex flex-col items-center pointer-events-none">
-                    {interval && !isTarget && (
-                      <span className={`text-[10px] mb-1 ${getIntervalColor(interval)}`}>{interval}</span>
-                    )}
-                    <span className={`text-[10px] font-bold ${isPlaying ? 'text-cyan-600' : 'text-slate-400'}`}>
-                      {key.primaryName}
-                    </span>
-                  </div>
-               </div>
-             );
-          })}
-        </div>
-        
-        {/* Black Keys */}
-        <div className="absolute inset-0 flex justify-center pointer-events-none px-4 pt-2">
-           <div className="relative flex h-full">
-              {keys.filter(k => !k.isBlack).map((wKey) => {
-                 const hasBlack = ['C', 'D', 'F', 'G', 'A'].includes(wKey.primaryName);
-                 const blackKeyObj = hasBlack 
-                    ? keys.find(k => k.isBlack && k.octave === wKey.octave && k.primaryName.startsWith(wKey.primaryName)) 
-                    : null;
-                 
-                 const isPlaying = blackKeyObj ? playingKeys.has(blackKeyObj.id) : false;
-                 
-                 const interval = blackKeyObj ? getInterval(blackKeyObj.primaryName) : null;
-                 const isTarget = blackKeyObj && (targetNotes.includes(blackKeyObj.id) || targetNotes.some(t => toSharp(normalize(t)) === blackKeyObj.primaryName));
+    <div className="relative overflow-x-auto pb-4 custom-scrollbar">
+      <div className="flex-none w-fit mx-auto relative select-none" style={{ minWidth: `${whiteKeys.length * 40}px` }}>
+        {/* White Keys */}
+        {whiteKeys.map((key, i) => {
+          const fullNote = `${key.note}${key.octave}`;
+          const isActive = activeNotes.has(fullNote);
+          const isTarget = targetNotes.includes(fullNote);
+          const isDataNote = data?.notes.some(n => toSharp(normalize(n)) === toSharp(normalize(fullNote)));
+          const extraClasses = isTarget ? 'bg-red-500 shadow-[0_0_20px_rgba(239,68,68,0.7)] animate-pulse' : '';
 
-                 return (
-                   <div key={`spacer-${wKey.id}`} className="w-12 md:w-16 h-full relative pointer-events-none mx-[1px]">
-                      {hasBlack && blackKeyObj && (
-                        <div 
-                          onMouseDown={(e) => {
-                             e.stopPropagation();
-                             handleManualPlay(blackKeyObj.primaryName, blackKeyObj.octave, blackKeyObj.id);
-                          }}
-                          onTouchStart={(e) => {
-                             e.preventDefault();
-                             e.stopPropagation();
-                             handleManualPlay(blackKeyObj.primaryName, blackKeyObj.octave, blackKeyObj.id);
-                          }}
-                          className={`
-                          absolute z-20 top-0 -right-2.5 md:-right-3 w-5 md:w-6 h-[66%] 
-                          rounded-b-md border-x border-b border-slate-900 
-                          shadow-[3px_6px_10px_rgba(0,0,0,0.7),inset_1px_0_2px_rgba(255,255,255,0.2)]
-                          pointer-events-auto
-                          flex flex-col justify-end items-center pb-3 cursor-pointer
-                          bg-gradient-to-b from-slate-800 via-black to-black
-                          piano-key
-                          ${getKeyStyle(interval, true, isPlaying, !!isTarget)}
-                        `}>
-                           {interval && !isTarget && (
-                              <span className={`text-[8px] mb-0.5 pointer-events-none ${getIntervalColor(interval)}`}>{interval}</span>
-                           )}
-                           {isTarget && <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse mb-1 pointer-events-none"></div>}
-                        </div>
-                      )}
-                   </div>
-                 );
-              })}
-           </div>
-        </div>
+          return (
+            <div
+              key={fullNote}
+              onMouseDown={() => handleManualPlay(key.note, key.octave)}
+              onMouseUp={() => stopNote(fullNote)}
+              onMouseLeave={() => isActive && stopNote(fullNote)} // Ensure note stops if mouse leaves while held
+              className={`
+                piano-key relative float-left w-10 h-40 bg-white border border-t-0 border-slate-700 rounded-b-md cursor-pointer 
+                shadow-[inset_0_-2px_8px_rgba(0,0,0,0.2)] hover:shadow-[0_0_15px_rgba(255,255,255,0.3)]
+                ${isActive ? 'key-active bg-cyan-600 !shadow-[0_0_20px_rgba(6,182,212,0.7)]' : ''}
+                ${isDataNote && !isTarget && !isActive ? 'bg-white/10' : ''} 
+                ${extraClasses}
+              `}
+              aria-label={`Play ${fullNote}`}
+              role="button"
+              tabIndex={0}
+            >
+              <span className={`absolute bottom-2 left-1/2 -translate-x-1/2 text-xs font-bold ${getNoteColor(fullNote)}`}>
+                {key.note}{key.octave}
+                {isTarget && <PlayCircle className="w-3 h-3 inline-block ml-1" />}
+              </span>
+            </div>
+          );
+        })}
+
+        {/* Black Keys */}
+        {blackKeys.map((key, i) => {
+          const fullNote = `${key.note}${key.octave}`;
+          const isActive = activeNotes.has(fullNote);
+          const isTarget = targetNotes.includes(fullNote);
+          const isDataNote = data?.notes.some(n => toSharp(normalize(n)) === toSharp(normalize(fullNote)));
+          const extraClasses = isTarget ? 'bg-red-700 shadow-[0_0_20px_rgba(239,68,68,0.7)] animate-pulse' : '';
+
+          return (
+            <div
+              key={fullNote}
+              onMouseDown={() => handleManualPlay(key.note, key.octave)}
+              onMouseUp={() => stopNote(fullNote)}
+              onMouseLeave={() => isActive && stopNote(fullNote)}
+              className={`
+                piano-key relative float-left w-8 h-24 bg-black border-slate-900 rounded-b-md cursor-pointer -ml-4 mr-1.5 
+                shadow-[inset_0_-2px_8px_rgba(255,255,255,0.1)] hover:shadow-[0_0_15px_rgba(0,0,0,0.5)]
+                ${isActive ? 'key-active bg-cyan-900 !shadow-[0_0_20px_rgba(6,182,212,0.7)]' : ''}
+                ${isDataNote && !isTarget && !isActive ? 'bg-black/30' : ''}
+                ${extraClasses}
+              `}
+              style={{ zIndex: 1 }}
+              aria-label={`Play ${fullNote}`}
+              role="button"
+              tabIndex={0}
+            >
+              <span className={`absolute bottom-2 left-1/2 -translate-x-1/2 text-xs font-bold ${getNoteColor(fullNote)}`}>
+                {key.note}{key.octave}
+                {isTarget && <PlayCircle className="w-3 h-3 inline-block ml-1" />}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      {/* MIDI Status Indicator */}
+      <div className="absolute top-4 left-4 p-2 bg-black/40 rounded-lg flex items-center gap-2 text-xs font-mono border border-white/10">
+          <Usb className={`w-4 h-4 ${midiStatus === 'connected' ? 'text-emerald-400' : midiStatus === 'disconnected' ? 'text-yellow-400' : 'text-slate-500'}`} />
+          <span className={`${midiStatus === 'connected' ? 'text-emerald-300' : midiStatus === 'disconnected' ? 'text-yellow-300' : 'text-slate-500'}`}>
+              MIDI: {midiStatus.toUpperCase()}
+          </span>
       </div>
     </div>
   );

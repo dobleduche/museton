@@ -1,13 +1,21 @@
 // server.js (Express backend)
 const express = require('express');
 const admin = require('firebase-admin');
-const app = express();
+const { GoogleGenAI, Type } = require('@google/genai'); // Import Gemini SDK
 
-// Initialize Firebase Admin
+const app = express();
+app.use(express.json()); // Middleware to parse JSON request bodies
+
+// Initialize Firebase Admin (assuming serviceAccountKey.json path is correct for your environment)
 admin.initializeApp({
-  credential: admin.credential.cert('path/to/serviceAccountKey.json'),
-  databaseURL: 'https://your-project.firebaseio.com'
+  credential: admin.credential.cert('./path/to/serviceAccountKey.json'), // <--- UPDATE THIS PATH
+  databaseURL: 'https://your-project.firebaseio.com' // <--- UPDATE THIS URL
 });
+
+// Initialize Gemini AI on the server (using env var for API key)
+// This assumes process.env.API_KEY is configured in your server's environment
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+const FREE_TIER_LIMIT = 3; // Server-side enforcement of free tier messages
 
 // Sign Up
 app.post('/signup', async (req, res) => {
@@ -38,9 +46,6 @@ app.post('/signin', async (req, res) => {
   }
 });
 
-// Logout (handled on frontend)
- // Use firebase.auth().signOut();
-
 // Forgot Password
 app.post('/forgot-password', async (req, res) => {
   const { email } = req.body;
@@ -52,5 +57,59 @@ app.post('/forgot-password', async (req, res) => {
   }
 });
 
-// Email Verification (handled via link, confirm on login)
-app.listen(3000, () => console.log('Server running'));
+// NEW AI CHAT ENDPOINT
+app.post('/api/ai/chat', async (req, res) => {
+  const { tutor, chatHistory, userMessage, isPro } = req.body;
+
+  if (!tutor || !userMessage || !chatHistory) {
+    return res.status(400).json({ message: 'Missing required chat parameters.' });
+  }
+
+  // Server-side Free Tier Enforcement
+  const userMessageCount = chatHistory.filter(m => m.role === 'user').length;
+  if (!isPro && userMessageCount >= FREE_TIER_LIMIT) {
+    return res.status(429).json({ message: `Free session limit reached (${FREE_TIER_LIMIT} questions). Upgrade to Pro for unlimited access.` });
+  }
+
+  try {
+    const systemInstruction = `
+      You are ${tutor.name}, a world-class music tutor specializing in ${tutor.specialty.join(', ')}.
+      Your teaching style is ${tutor.rate === '$$$' ? 'sophisticated and strict' : 'casual and encouraging'}.
+      Location: ${tutor.location}.
+      Keep responses concise (under 50 words) and actionable.
+      You are an AI, but use the persona of ${tutor.name}.
+    `;
+
+    // Map chat history to Gemini's expected format
+    const contents = chatHistory.map(m => ({ role: m.role, parts: [{ text: m.text }] }));
+    // Add the current user message
+    contents.push({ role: 'user', parts: [{ text: userMessage }] });
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash', // Appropriate model for conversational text
+      contents: contents,
+      config: { systemInstruction }
+    });
+
+    const aiResponseText = response.text;
+    if (!aiResponseText) {
+      return res.status(500).json({ message: 'AI returned an empty response.' });
+    }
+
+    res.json({ text: aiResponseText });
+
+  } catch (error) {
+    console.error('Gemini API Error on backend:', error);
+    if (error.message?.includes('429') || error.message?.includes('quota') || error.message?.includes('RESOURCE_EXHAUSTED')) {
+      return res.status(429).json({ message: 'API Quota Exceeded. Please try again later or upgrade to Pro.' });
+    }
+    if (error.message?.includes('API_KEY')) {
+      return res.status(500).json({ message: 'Backend API Key not configured correctly.' });
+    }
+    res.status(500).json({ message: 'Internal server error processing AI request.' });
+  }
+});
+
+// Start the server
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));

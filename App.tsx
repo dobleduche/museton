@@ -1,5 +1,4 @@
 
-
 import React, { useState, useRef, useEffect } from 'react';
 import { 
   Music, Search, Mic, Radio, BookOpen, Crown, User, ShieldCheck, MapPin, 
@@ -232,6 +231,11 @@ export const App = () => {
   const [assignments, setAssignments] = useState<Assignment[]>(MOCK_ASSIGNMENTS);
   const [lastInputEvent, setLastInputEvent] = useState<{note: string, timestamp: number} | null>(null);
 
+  // MIDI State
+  const [midiEnabled, setMidiEnabled] = useState(false);
+  const [midiStatus, setMidiStatus] = useState<'connected' | 'disconnected' | 'unsupported'>('unsupported');
+
+
   // Init & Persistence Check
   useEffect(() => {
     const init = async () => {
@@ -240,6 +244,7 @@ export const App = () => {
       if (storedPrefs) {
           const parsed = JSON.parse(storedPrefs);
           setUserPrefs(parsed);
+          setMidiEnabled(parsed.midiEnabled || false); // Load MIDI preference
       } else {
           // If no prefs, show the banner
           setShowCookieBanner(true);
@@ -297,6 +302,23 @@ export const App = () => {
       // Network Listeners
       window.addEventListener('online', () => setIsOnline(true));
       window.addEventListener('offline', () => setIsOnline(false));
+      
+      // MIDI Status Check (initial)
+      if ('requestMIDIAccess' in navigator) {
+          navigator.requestMIDIAccess().then(midiAccess => {
+              const inputs = Array.from(midiAccess.inputs.values());
+              setMidiStatus(inputs.length > 0 ? 'connected' : 'disconnected');
+              midiAccess.onstatechange = (event) => {
+                  const updatedInputs = Array.from(midiAccess.inputs.values());
+                  setMidiStatus(updatedInputs.length > 0 ? 'connected' : 'disconnected');
+              };
+          }).catch(() => {
+              setMidiStatus('unsupported');
+          });
+      } else {
+          setMidiStatus('unsupported');
+      }
+
     };
     init();
   }, []);
@@ -310,6 +332,7 @@ export const App = () => {
       
       // Apply immediate effects
       if (updates.masterTuning) setMusicalSettings(s => ({...s, tuning: updates.masterTuning!}));
+      if (updates.midiEnabled !== undefined) setMidiEnabled(updates.midiEnabled);
   };
   
   const handleConsent = (accepted: boolean) => {
@@ -383,8 +406,9 @@ export const App = () => {
       newLevel++;
       newXp = newXp - nextXp;
       nextXp = Math.floor(nextXp * 1.5);
-      audio.playTone(880, 'sine', 0.1);
-      setTimeout(() => audio.playTone(1760, 'sine', 0.2), 100);
+      // Fix: Call the new playTone method
+      audio.playTone(880, 'sine', 0.1, 0.5);
+      setTimeout(() => audio.playTone(1760, 'sine', 0.2, 0.5), 100);
     }
 
     const updated = { ...persona, xp: newXp, level: newLevel, nextLevelXp: nextXp };
@@ -891,6 +915,8 @@ export const App = () => {
                       tuning={musicalSettings.tuning} 
                       targetNotes={activeLesson ? activeLesson.steps.flatMap(s => s.targetNotes) : targetNotes}
                       onPlayNote={handleNoteInput}
+                      midiEnabled={midiEnabled}
+                      midiStatus={midiStatus}
                     />
                 )}
                 
@@ -973,25 +999,13 @@ export const App = () => {
                     </h2>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                        {recordings.length === 0 && <div className="p-8 text-center text-slate-500 border border-dashed border-white/10 rounded-xl">No recordings yet. Head to the Studio or Live Loop to make some noise!</div>}
-                       {recordings.map((rec) => (
-                         <div key={rec.id} className="glass-panel p-4 rounded-xl group relative overflow-hidden">
-                            <div className="flex justify-between items-start">
-                               <div>
-                                  <h3 className="font-bold text-white">{rec.name}</h3>
-                                  <p className="text-xs text-slate-400">{new Date(rec.timestamp).toLocaleDateString()} • {Math.round(rec.duration)}s</p>
-                               </div>
-                               <div className="flex gap-2">
-                                  <button onClick={() => handlePlayRecording(rec.blob)} className="p-2 bg-cyan-600/20 text-cyan-400 rounded hover:bg-cyan-600 hover:text-black transition-all">
-                                     <Play className="w-4 h-4" />
-                                  </button>
-                                  <button onClick={() => handleDownloadRecording(rec.blob, rec.name)} className="p-2 bg-slate-800 text-slate-400 rounded hover:text-white transition-all relative">
-                                     {isPro ? <Download className="w-4 h-4" /> : <Lock className="w-4 h-4 text-yellow-500" />}
-                                  </button>
-                                  <button onClick={() => handleDeleteRecording(rec.id)} className="p-2 bg-red-900/20 text-red-400 rounded hover:bg-red-600 hover:text-white transition-all">
-                                     <Trash2 className="w-4 h-4" />
-                                  </button>
-                               </div>
+                       {recordings.map((rec: any, i) => (
+                         <div key={i} onClick={() => handlePlayRecording(rec.blob)} className="flex items-center justify-between p-2 rounded bg-white/5 hover:bg-white/10 group cursor-pointer">
+                            <div className="flex items-center gap-2 overflow-hidden">
+                               <FileAudio className="w-3 h-3 text-cyan-500" />
+                               <span className="text-xs text-slate-300 truncate">{rec.name}</span>
                             </div>
+                            <Play className="w-3 h-3 text-cyan-400 opacity-0 group-hover:opacity-100" />
                          </div>
                        ))}
                     </div>

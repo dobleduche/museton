@@ -1,7 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Tutor } from '../types';
-import { GoogleGenAI } from "@google/genai";
+// Removed direct import of GoogleGenAI to proxy AI calls through the backend
 import { Send, User, Bot, Crown, X } from 'lucide-react';
+import { sendChatMessage } from '../services/apiService'; // Import the new API service
 
 interface TutorChatProps {
     tutor: Tutor;
@@ -9,9 +10,8 @@ interface TutorChatProps {
     isPro: boolean;
 }
 
-// Instantiate GoogleGenAI here to avoid recreation on every render,
-// as API key is assumed to be consistently available via process.env.API_KEY.
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+// GoogleGenAI instantiation removed from client-side as per L0 hard rules.
+// All AI calls will now be proxied through the backend.
 
 export const TutorChat: React.FC<TutorChatProps> = ({ tutor, onClose, isPro }) => {
     const [messages, setMessages] = useState<{role: 'user'|'model', text: string}[]>([
@@ -21,16 +21,16 @@ export const TutorChat: React.FC<TutorChatProps> = ({ tutor, onClose, isPro }) =
     const [loading, setLoading] = useState(false);
     const bottomRef = useRef<HTMLDivElement>(null);
 
-    // Free tier limit: 3 user messages
+    // Free tier limit: 3 user messages (client-side display, backend enforces)
     const FREE_TIER_LIMIT = 3;
-    const isRateLimited = !isPro && messages.filter(m => m.role === 'user').length >= FREE_TIER_LIMIT;
+    const isRateLimitedClientSide = !isPro && messages.filter(m => m.role === 'user').length >= FREE_TIER_LIMIT;
 
     useEffect(() => {
         bottomRef.current?.scrollIntoView({ behavior: "smooth" });
     }, [messages]);
 
     const handleSend = async () => {
-        if (!input.trim() || loading || isRateLimited) return;
+        if (!input.trim() || loading || isRateLimitedClientSide) return; // Use client-side limit for immediate UI feedback
         
         const userMsg = input;
         setInput("");
@@ -38,32 +38,18 @@ export const TutorChat: React.FC<TutorChatProps> = ({ tutor, onClose, isPro }) =
         setLoading(true);
 
         try {
-            const systemInstruction = `
-                You are ${tutor.name}, a world-class music tutor specializing in ${tutor.specialty.join(', ')}.
-                Your teaching style is ${tutor.rate === '$$$' ? 'sophisticated and strict' : 'casual and encouraging'}.
-                Location: ${tutor.location}.
-                Keep responses concise (under 50 words) and actionable.
-                You are an AI, but use the persona of ${tutor.name}.
-            `;
-            
-            const chatHistoryForAPI = messages.map(m => ({ role: m.role, parts: [{ text: m.text }] }));
-            // Add the current user message to the history for the API call
-            const contents = chatHistoryForAPI.concat([{ role: 'user', parts: [{ text: userMsg }] }]);
-
-            const response = await ai.models.generateContent({
-                model: 'gemini-2.5-flash', // Appropriate model for conversational text
-                contents: contents as any,
-                config: { systemInstruction }
-            });
+            // Call the new backend API service
+            const response = await sendChatMessage(tutor, messages, userMsg, isPro);
             
             setMessages(prev => [...prev, { role: 'model', text: response.text || "I'm listening..." }]);
         } catch (e: any) {
             console.error("Tutor chat API error:", e);
             let errorMessage = "Connection with the studio was lost. Try again.";
-            if (e.message?.includes('429') || e.message?.includes('quota')) {
-                 errorMessage = "⚠️ System Overload: Global API Quota Exceeded. Please try again later. Or upgrade to Pro for unlimited access.";
-            } else if (e.message?.includes('API_KEY')) {
-                 errorMessage = "⚠️ API Key not configured. Please ensure your API key is correctly set.";
+            // Specific error messages from the backend API
+            if (e.message?.includes('Limit reached') || e.message?.includes('Quota Exceeded')) {
+                 errorMessage = "⚠️ Free session limit reached or API Quota Exceeded. Please upgrade to Pro for unlimited access.";
+            } else if (e.message?.includes('API Key not configured')) {
+                 errorMessage = "⚠️ Backend API Key not configured. Contact support.";
             }
             setMessages(prev => [...prev, { role: 'model', text: errorMessage }]);
         }
@@ -117,7 +103,7 @@ export const TutorChat: React.FC<TutorChatProps> = ({ tutor, onClose, isPro }) =
 
                 {/* Input Area */}
                 <div className="p-4 bg-slate-800 border-t border-slate-700">
-                    {isRateLimited && (
+                    {isRateLimitedClientSide && ( // Client-side limit display
                         <div className="mb-3 p-2 bg-yellow-500/10 border border-yellow-500/30 rounded text-center animate-in fade-in">
                             <p className="text-xs text-yellow-200 mb-1">Free Session Limit Reached ({FREE_TIER_LIMIT} questions)</p>
                             <button className="text-xs font-bold bg-yellow-500 text-black px-3 py-1 rounded hover:scale-105 transition-transform flex items-center justify-center gap-1 w-full">
@@ -131,13 +117,13 @@ export const TutorChat: React.FC<TutorChatProps> = ({ tutor, onClose, isPro }) =
                             value={input}
                             onChange={(e) => setInput(e.target.value)}
                             onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-                            placeholder={isRateLimited ? "Limit reached..." : "Ask for advice..."}
-                            disabled={isRateLimited || loading}
+                            placeholder={isRateLimitedClientSide ? "Limit reached..." : "Ask for advice..."}
+                            disabled={isRateLimitedClientSide || loading}
                             className="flex-1 bg-slate-900 border border-slate-600 rounded-lg px-4 py-2 text-white text-sm focus:outline-none focus:border-cyan-500 disabled:opacity-50 disabled:cursor-not-allowed"
                         />
                         <button 
                              onClick={handleSend}
-                             disabled={isRateLimited || loading}
+                             disabled={isRateLimitedClientSide || loading}
                              className="p-2 bg-cyan-600 hover:bg-cyan-500 rounded-lg text-black transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                             <Send className="w-5 h-5" />

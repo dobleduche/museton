@@ -1,6 +1,5 @@
-
 import React, { useState } from 'react';
-import { Settings, Volume2, Database, Sliders, X, Check, Activity, Trash2, Gauge } from 'lucide-react';
+import { Settings, Volume2, Database, Sliders, X, Check, Activity, Trash2, Gauge, Usb } from 'lucide-react';
 import { UserPreferences } from '../types';
 import { audio } from '../services/audioEngine';
 
@@ -139,6 +138,19 @@ export const SettingsModal: React.FC<Props> = ({ prefs, onUpdate, onClose }) => 
                                     <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${prefs.lowPerformanceMode ? 'left-5' : 'left-1'}`}></div>
                                 </button>
                             </div>
+                            
+                            <div className="flex items-center justify-between p-3 bg-slate-800 rounded-lg">
+                                <div>
+                                    <div className="text-sm font-bold text-white flex items-center gap-2"><Usb className="w-4 h-4" /> MIDI Input</div>
+                                    <div className="text-xs text-slate-500">Enable physical MIDI device connection</div>
+                                </div>
+                                <button 
+                                    onClick={() => onUpdate({ midiEnabled: !prefs.midiEnabled })}
+                                    className={`w-10 h-6 rounded-full transition-colors relative ${prefs.midiEnabled ? 'bg-emerald-600' : 'bg-slate-600'}`}
+                                >
+                                    <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${prefs.midiEnabled ? 'left-5' : 'left-1'}`}></div>
+                                </button>
+                            </div>
                         </div>
                     )}
 
@@ -173,5 +185,6 @@ export const SettingsModal: React.FC<Props> = ({ prefs, onUpdate, onClose }) => 
                 </div>
             </div>
         </div>
-    );
+    </div>
+  );
 };

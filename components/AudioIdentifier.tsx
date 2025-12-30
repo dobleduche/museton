@@ -1,4 +1,5 @@
 
+
 import React, { useState, useEffect, useRef } from 'react';
 import { Mic, Search, Activity, Globe, Music, BarChart3, Radio, Check, X } from 'lucide-react';
 import { AudioAnalysis } from '../types';
@@ -19,7 +20,8 @@ export const AudioIdentifier = () => {
         if(!ctx) return;
         
         // Use real analyser from engine if available
-        const analyser = audio.analyser;
+        // Fix: Use the correct getter for the microphone analyser
+        const analyser = audio.microphoneAnalyser;
 
         const draw = () => {
             const w = canvasRef.current!.width;
